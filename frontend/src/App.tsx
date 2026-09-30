@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Ban, Boxes, GitBranch, ListOrdered, Play } from "lucide-react";
-import { createRelease, cancelRelease, subscribe } from "./api";
+import { Activity, Ban, Boxes, GitBranch, ListOrdered, PieChart, Play, RotateCcw, StopCircle } from "lucide-react";
+import { createRelease, cancelRelease, finishRelease, resumeRelease, subscribe } from "./api";
 import type { Batch, Snapshot } from "./types";
 
 const phaseLabel: Record<string, string> = {
@@ -18,6 +18,7 @@ const phaseLabel: Record<string, string> = {
 const releaseLabel: Record<string, string> = {
   pending: "等待开始",
   in_progress: "进行中",
+  paused: "已暂停·待决策",
   succeeded: "发布成功",
   failed: "失败",
   cancelling: "取消中",
@@ -47,6 +48,31 @@ export function App() {
   );
   const latestRelease = snap?.releases[snap.releases.length - 1];
 
+  // Version distribution is always computed from the real instance states,
+  // never from a preset progress bar. Instances that are mid-update or
+  // mid-rollback are called out separately and never counted as done.
+  const distribution = useMemo(() => {
+    if (!snap) return [];
+    const counts = new Map<string, number>();
+    for (const inst of snap.instances) {
+      counts.set(inst.currentVersion, (counts.get(inst.currentVersion) ?? 0) + 1);
+    }
+    return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [snap]);
+
+  const inFlight = useMemo(() => {
+    if (!snap || !activeRelease) return { updating: 0, observing: 0, rollingBack: 0 };
+    let updating = 0, observing = 0, rollingBack = 0;
+    for (const b of snap.batches.filter((x) => x.releaseId === activeRelease.id)) {
+      for (const m of b.members) {
+        if (m.updateState === "in_progress") updating++;
+        else if (m.updateState === "rollback_in_progress") rollingBack++;
+        else if (m.updateState === "succeeded" && (m.healthState === "in_progress" || m.healthState === "pending")) observing++;
+      }
+    }
+    return { updating, observing, rollingBack };
+  }, [snap, activeRelease]);
+
   if (!snap) return <div className="loading">正在加载演练状态…</div>;
 
   const submit = async () => {
@@ -69,6 +95,20 @@ export function App() {
 
   const shownRelease = activeRelease ?? latestRelease;
   const batches = shownRelease ? snap.batches.filter((b) => b.releaseId === shownRelease.id) : [];
+  const pausedFailedBatch = shownRelease?.status === "paused"
+    ? batches.find((b) => b.phase === "failed")
+    : undefined;
+
+  const decide = async (action: "resume" | "finish") => {
+    if (!shownRelease) return;
+    setError("");
+    try {
+      if (action === "resume") await resumeRelease(shownRelease.id);
+      else await finishRelease(shownRelease.id);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   return (
     <div className="page">
@@ -150,6 +190,32 @@ export function App() {
           {error && <p className="error">{error}</p>}
           <p className="hint">取消后不会再扩到后续批次；当前批次中已更新实例会明确回退到原版本。</p>
         </div>
+
+        <div className="card">
+          <h2><PieChart size={18} /> 版本分布（实时核对）</h2>
+          <table>
+            <thead><tr><th>版本</th><th>实例数</th><th>占比</th></tr></thead>
+            <tbody>
+              {distribution.map(([ver, n]) => (
+                <tr key={ver}>
+                  <td><code>{ver}</code></td>
+                  <td>{n} 台</td>
+                  <td>
+                    <div className="dist-bar">
+                      <div className="dist-fill" style={{ width: `${(n / Math.max(1, snap.instances.length)) * 100}%` }} />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {activeRelease && (inFlight.updating + inFlight.observing + inFlight.rollingBack > 0) && (
+            <p className="hint">
+              进行中未计入完成：更新中 {inFlight.updating} · 健康观察 {inFlight.observing} · 回退中 {inFlight.rollingBack}
+            </p>
+          )}
+          <p className="hint">分布按实例真实当前版本统计；回退中的实例不会被提前算作已完成。</p>
+        </div>
       </section>
 
       {shownRelease && (
@@ -161,6 +227,29 @@ export function App() {
             目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baselineVersion}</code>，
             策略 {shownRelease.strategy}，每批 {shownRelease.batchSize} 台 · {shownRelease.message ?? "进行中，所有进度实时持久化"}
           </p>
+          {pausedFailedBatch && (
+            <div className="decision">
+              <h3>发布已暂停：请审查第 {pausedFailedBatch.index + 1} 批的失败实例</h3>
+              <ul>
+                {pausedFailedBatch.members
+                  .filter((m) => m.updateState === "failed" || m.healthState === "unhealthy")
+                  .map((m) => (
+                    <li key={m.instanceId}>
+                      <strong>{m.instanceId}</strong>（<code>{m.fromVersion} → {m.toVersion}</code>）：{m.message}
+                    </li>
+                  ))}
+              </ul>
+              <div className="actions">
+                <button className="warn-btn" onClick={() => decide("resume")}>
+                  <RotateCcw size={15} /> 继续回退失败批次
+                </button>
+                <button className="danger" onClick={() => decide("finish")}>
+                  <StopCircle size={15} /> 结束本次演练（保留现场）
+                </button>
+              </div>
+              <p className="hint">刷新或重开页面后决策入口仍在；选择前实例保持当前真实状态。</p>
+            </div>
+          )}
           <div className="batches">
             {batches.map((b) => <BatchView key={b.id} batch={b} ops={snap.ops} />)}
           </div>
@@ -234,4 +323,3 @@ function healthLabel(s: string): string {
   };
   return m[s] ?? s;
 }
-

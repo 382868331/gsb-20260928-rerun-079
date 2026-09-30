@@ -29,8 +29,10 @@ func newService(t *testing.T, dir string) *engine.Service {
 	return svc
 }
 
-// Scenario 1: half the first batch fails health observation. The batch rolls
-// back, later batches never expand, and every instance ends on the baseline.
+// Scenario 1: half the first batch fails health observation. The release
+// pauses for review; after the operator resumes the rollback, the batch
+// rolls back, later batches never expand, and every instance ends on the
+// baseline.
 func TestHalfBatchFailureRollback(t *testing.T) {
 	dir := t.TempDir()
 	svc := newService(t, dir)
@@ -44,6 +46,24 @@ func TestHalfBatchFailureRollback(t *testing.T) {
 	}
 
 	now := t0
+	runUntil(t, svc, &now, 2*time.Second)
+
+	// The failure must pause the release instead of rolling back silently.
+	st0 := snapshotStore(t, dir)
+	st0.View(func(tx *store.Tx) {
+		r := tx.Releases()[0]
+		if r.Status != "paused" {
+			t.Fatalf("after failure status = %s, want paused", r.Status)
+		}
+		if tx.Batches()[0].Phase != "failed" {
+			t.Fatalf("batch0 phase = %s, want failed", tx.Batches()[0].Phase)
+		}
+	})
+
+	// Operator reviews the failed instances and chooses to continue rollback.
+	if err := svc.ResumeRollback(rel.ID, now); err != nil {
+		t.Fatal(err)
+	}
 	runUntil(t, svc, &now, 2*time.Second)
 
 	var snap store.Snapshot
@@ -87,6 +107,93 @@ func TestHalfBatchFailureRollback(t *testing.T) {
 	}
 }
 
+// Scenario 1b: after a paused failure the operator may instead end the
+// drill. The failure scene is kept (updated instances stay on the target
+// version), later batches never expand, and a new release may start after.
+func TestPausedFailureFinishKeepsScene(t *testing.T) {
+	dir := t.TempDir()
+	svc := newService(t, dir)
+	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
+		TargetVersion: "v2.0.0", BatchSize: 2, Strategy: "rolling",
+		Failure: store.FailureSpec{Mode: "half_batch"},
+	}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := t0
+	runUntil(t, svc, &now, 2*time.Second)
+
+	if err := svc.FinishRelease(rel.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	runUntil(t, svc, &now, 500*time.Millisecond)
+
+	st := snapshotStore(t, dir)
+	st.View(func(tx *store.Tx) {
+		r := tx.Releases()[0]
+		if r.Status != "failed" {
+			t.Fatalf("status = %s, want failed", r.Status)
+		}
+		batches := tx.Batches()
+		if batches[0].Phase != "failed" {
+			t.Fatalf("batch0 phase = %s, want failed (scene kept)", batches[0].Phase)
+		}
+		if batches[1].Phase != "pending" || batches[2].Phase != "pending" {
+			t.Fatalf("later batches must stay pending: %s %s", batches[1].Phase, batches[2].Phase)
+		}
+		// Scene kept: the instances that really moved stay on v2.0.0.
+		moved := 0
+		for _, inst := range tx.Instances() {
+			if inst.CurrentVersion == "v2.0.0" {
+				moved++
+			}
+		}
+		if moved == 0 {
+			t.Fatal("ending the drill must keep the failure scene, but no instance is on v2.0.0")
+		}
+	})
+
+	// The drill is over: a fresh release may be created afterwards.
+	if _, err := svc.CreateRelease(engine.CreateReleaseRequest{
+		TargetVersion: "v2.0.0", BatchSize: 2, Failure: store.FailureSpec{Mode: "none"},
+	}, now); err != nil {
+		t.Fatalf("new release after finish should be allowed: %v", err)
+	}
+}
+
+// Scenario 1c: cancelling while paused on a failure still rolls the failed
+// batch back; the cancel decision always wins.
+func TestCancelWhilePausedRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	svc := newService(t, dir)
+	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
+		TargetVersion: "v2.0.0", BatchSize: 2,
+		Failure: store.FailureSpec{Mode: "half_batch"},
+	}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := t0
+	runUntil(t, svc, &now, 2*time.Second)
+	if err := svc.CancelRelease(rel.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	runUntil(t, svc, &now, 2*time.Second)
+
+	st := snapshotStore(t, dir)
+	st.View(func(tx *store.Tx) {
+		r := tx.Releases()[0]
+		if r.Status != "cancelled" {
+			t.Fatalf("status = %s, want cancelled", r.Status)
+		}
+		for _, inst := range tx.Instances() {
+			if inst.CurrentVersion != "v1.0.0" {
+				t.Fatalf("instance %s = %s, want v1.0.0", inst.ID, inst.CurrentVersion)
+			}
+		}
+	})
+}
+
 // Scenario 2: rollback is interrupted repeatedly. Reopen the store mid
 // rollback (simulating process kill + restart); recovery must finish and
 // every instance must still land on the baseline.
@@ -101,6 +208,18 @@ func TestRollbackInterruptedAcrossRestart(t *testing.T) {
 	}
 
 	now := t0
+	// Run until the failure pauses the release, then resume the rollback.
+	runUntil(t, svc, &now, 2*time.Second)
+	relID := ""
+	snapshotStore(t, dir).View(func(tx *store.Tx) {
+		relID = tx.Releases()[0].ID
+		if tx.Releases()[0].Status != "paused" {
+			t.Fatalf("status = %s, want paused before resume", tx.Releases()[0].Status)
+		}
+	})
+	if err := svc.ResumeRollback(relID, now); err != nil {
+		t.Fatal(err)
+	}
 	// Let rollback start and suffer one interruption.
 	for i := 0; i < 12; i++ {
 		now = now.Add(50 * time.Millisecond)
@@ -185,6 +304,20 @@ func TestLateHealthResultNotAttributedToNext(t *testing.T) {
 	// rollback ops by removing them and keep one health op artificially:
 	// instead we fast-forward naturally and verify that after rollback no
 	// later release gets blamed.
+	runUntil(t, svc, &now, 1500*time.Millisecond)
+
+	// The failure pauses the release; the operator resumes the rollback so
+	// the first release reaches its rolled-back end state.
+	snapshotStore(t, dir).View(func(tx *store.Tx) {
+		if tx.Releases()[0].Status != "paused" {
+			t.Fatalf("first release status = %s, want paused", tx.Releases()[0].Status)
+		}
+	})
+	var firstID string
+	snapshotStore(t, dir).View(func(tx *store.Tx) { firstID = tx.Releases()[0].ID })
+	if err := svc.ResumeRollback(firstID, now); err != nil {
+		t.Fatal(err)
+	}
 	runUntil(t, svc, &now, 1500*time.Millisecond)
 
 	// Now start a second successful release to v2.0.0: any late result from

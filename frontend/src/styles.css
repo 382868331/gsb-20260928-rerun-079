@@ -70,6 +70,22 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .r-rolled_back, .r-failed { background: rgba(229,85,106,.18); color: var(--err); }
 .r-cancelled { background: rgba(139,151,173,.2); color: var(--muted); }
 .r-in_progress, .r-cancelling, .r-pending { background: rgba(79,140,255,.18); color: var(--accent); }
+.r-paused { background: rgba(232,163,61,.2); color: var(--warn); }
+
+.decision {
+  border: 1px solid rgba(232,163,61,.55); border-radius: 10px;
+  background: rgba(232,163,61,.08); padding: 12px 14px; margin-bottom: 14px;
+}
+.decision h3 { margin: 0 0 8px; font-size: 14px; color: var(--warn); }
+.decision ul { margin: 0 0 10px; padding-left: 18px; font-size: 13px; }
+.decision li { margin-bottom: 4px; }
+.warn-btn {
+  background: rgba(232,163,61,.18); color: var(--warn);
+  border: 1px solid rgba(232,163,61,.55);
+}
+
+.dist-bar { background: var(--panel2); border-radius: 6px; height: 10px; min-width: 120px; overflow: hidden; }
+.dist-fill { background: var(--accent); height: 100%; border-radius: 6px; transition: width .4s ease; }
 
 .batches { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .batch {
@@ -112,4 +128,3 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .lv-warn { border-left: 3px solid var(--warn); }
 .lv-error { border-left: 3px solid var(--err); }
 .lv-info { border-left: 3px solid var(--accent); }
-

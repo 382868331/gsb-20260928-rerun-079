@@ -57,7 +57,7 @@ type Release struct {
 	Strategy        string      `json:"strategy"` // rolling
 	BatchSize       int         `json:"batchSize"`
 	BatchIDs        []string    `json:"batchIds"`
-	Status          string      `json:"status"` // pending|in_progress|succeeded|failed|cancelling|rolled_back|cancelled
+	Status          string      `json:"status"` // pending|in_progress|paused|succeeded|failed|cancelling|rolled_back|cancelled
 	Failure         FailureSpec `json:"failure"`
 	CancelRequested bool        `json:"cancelRequested"`
 	CreatedAt       string      `json:"createdAt"`

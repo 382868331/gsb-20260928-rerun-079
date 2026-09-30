@@ -142,6 +142,44 @@ func (s *Service) CancelRelease(releaseID string, now time.Time) error {
 	})
 }
 
+// ResumeRollback is the operator decision "继续回退" after a paused failure:
+// the failed batch rolls back and the release ends as rolled_back.
+func (s *Service) ResumeRollback(releaseID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if rel.Status != "paused" {
+			return errors.New("发布未处于暂停待决策状态")
+		}
+		rel.Status = "in_progress"
+		rel.Message = "已确认继续回退：失败批次正在返回原版本"
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "人工决策：审查完成，继续回退失败批次")
+		return nil
+	})
+}
+
+// FinishRelease is the operator decision "结束本次演练": the release stops
+// where it is, the failure scene is kept for review and nothing is rolled
+// back automatically. Later batches never expand.
+func (s *Service) FinishRelease(releaseID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if rel.Status != "paused" {
+			return errors.New("发布未处于暂停待决策状态")
+		}
+		rel.Status = "failed"
+		rel.FinishedAt = nowStr(now)
+		rel.Message = "演练已结束：失败现场保留供审查，未回退实例保持当前版本，后续批次未扩批"
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "人工决策：结束本次演练，保留失败现场")
+		return nil
+	})
+}
+
 func (s *Service) CreateVersion(id, name string, now time.Time) (*store.Version, error) {
 	if id == "" || name == "" {
 		return nil, errors.New("版本 ID 与名称不能为空")

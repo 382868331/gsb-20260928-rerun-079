@@ -29,6 +29,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/releases", s.handleCreateRelease)
 	mux.HandleFunc("POST /api/releases/{id}/cancel", s.handleCancel)
+	mux.HandleFunc("POST /api/releases/{id}/resume", s.handleResume)
+	mux.HandleFunc("POST /api/releases/{id}/finish", s.handleFinish)
 	mux.HandleFunc("POST /api/versions", s.handleCreateVersion)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
@@ -134,6 +136,24 @@ func (s *Server) handleCreateRelease(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.CancelRelease(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.ResumeRollback(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.FinishRelease(r.PathValue("id"), time.Now()); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

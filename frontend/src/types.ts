@@ -48,7 +48,7 @@ export interface Release {
   strategy: string;
   batchSize: number;
   batchIds: string[];
-  status: "pending" | "in_progress" | "succeeded" | "failed" | "cancelling" | "rolled_back" | "cancelled";
+  status: "pending" | "in_progress" | "paused" | "succeeded" | "failed" | "cancelling" | "rolled_back" | "cancelled";
   failure: FailureSpec;
   cancelRequested: boolean;
   createdAt: string;
@@ -87,4 +87,3 @@ export interface Snapshot {
   ops: Op[];
   events: Event[];
 }
-

@@ -16,6 +16,13 @@ func (e *Engine) reconcile(tx *store.Tx, now time.Time) (bool, error) {
 		batches := releaseBatches(tx, rel.ID)
 		activeIdx := -1
 		for j := range batches {
+			if batches[j].Phase == "failed" {
+				// A failed batch pauses the release for a human decision;
+				// it only becomes terminal after the operator resumes the
+				// rollback or ends the drill.
+				activeIdx = j
+				break
+			}
 			if isBatchTerminal(batches[j].Phase) {
 				if batches[j].Phase != "succeeded" {
 					// Failed/cancelled/rolled-back batch blocks all later
@@ -81,17 +88,17 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		return true
 
 	case "updating", "observing":
-		// 1. update failure -> rollback the whole batch.
+		// 1. update failure -> pause and wait for the operator's decision.
 		for i := range b.Members {
 			if b.Members[i].UpdateState == "failed" {
-				e.startBatchRollback(tx, rel, b, now, "批次内存在更新失败的实例")
+				e.pauseBatch(tx, rel, b, now, "批次内存在更新失败的实例")
 				return true
 			}
 		}
-		// 2. unhealthy observation -> rollback.
+		// 2. unhealthy observation -> pause and wait for the decision.
 		for i := range b.Members {
 			if b.Members[i].HealthState == "unhealthy" {
-				e.startBatchRollback(tx, rel, b, now, "健康观察未通过")
+				e.pauseBatch(tx, rel, b, now, "健康观察未通过")
 				return true
 			}
 		}
@@ -129,6 +136,20 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		}
 		return false
 
+	case "failed":
+		// Paused on failure: the operator reviews the failed instances and
+		// either resumes the rollback or ends the drill. A cancel request
+		// always wins and rolls the batch back immediately.
+		if rel.Status == "paused" && !rel.CancelRequested {
+			return false
+		}
+		reason := "人工确认继续回退，失败批次返回原版本"
+		if rel.CancelRequested {
+			reason = "发布已取消，失败批次整体回退"
+		}
+		e.startBatchRollback(tx, rel, b, now, reason)
+		return true
+
 	case "rolling_back":
 		for i := range b.Members {
 			if b.Members[i].UpdateState == "rollback_in_progress" {
@@ -147,6 +168,16 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		return true
 	}
 	return false
+}
+
+// pauseBatch freezes the release on the failed batch so the operator can
+// review exactly which instances failed before deciding what happens next.
+func (e *Engine) pauseBatch(tx *store.Tx, rel *store.Release, b *store.Batch, now time.Time, reason string) {
+	b.Phase = "failed"
+	b.FinishedAt = nowStr(now)
+	rel.Status = "paused"
+	rel.Message = "发布已暂停：" + reason + "。请审查失败实例，再选择继续回退或结束本次演练"
+	tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "error", batchLabel(b)+" 失败（"+reason+"），发布已暂停，等待人工决策")
 }
 
 func (e *Engine) startBatchRollback(tx *store.Tx, rel *store.Release, b *store.Batch, now time.Time, reason string) {
