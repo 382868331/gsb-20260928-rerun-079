@@ -147,3 +147,71 @@ func TestPausedReleaseHTTPFlow(t *testing.T) {
 		}
 	}
 }
+
+// A fresh data directory must serve empty collections as [] (never null),
+// so the UI renders an explicit empty state instead of crashing.
+func TestEmptySnapshotUsesEmptyArrays(t *testing.T) {
+	e := newTestEnv(t)
+	code, data := e.do(t, http.MethodGet, "/api/state", "")
+	if code != 200 {
+		t.Fatalf("state status = %d", code)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"releases", "batches", "ops", "events", "versions", "instances"} {
+		v := strings.TrimSpace(string(raw[key]))
+		if v == "null" || v == "" {
+			t.Fatalf("%s serialized as %q, want [] for empty collections", key, v)
+		}
+	}
+	if got := strings.TrimSpace(string(raw["releases"])); got != "[]" {
+		t.Fatalf("releases = %s, want [] on a fresh directory", got)
+	}
+}
+
+// Review pause over HTTP: pause a healthy release, inspect the evidence via
+// the snapshot, then continue to a successful finish.
+func TestReviewPauseHTTPFlow(t *testing.T) {
+	e := newTestEnv(t)
+	code, body := e.do(t, http.MethodPost, "/api/releases", `{"targetVersion":"v2.0.0","batchSize":2,"strategy":"rolling","failure":{"mode":"none"}}`)
+	if code != 200 {
+		t.Fatalf("create status = %d body=%s", code, body)
+	}
+	var rel struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &rel); err != nil {
+		t.Fatal(err)
+	}
+	code, _ = e.do(t, http.MethodPost, "/api/releases/"+rel.ID+"/pause", "")
+	if code != 202 {
+		t.Fatalf("pause status = %d", code)
+	}
+	snap := e.tickUntil(t, "paused", 5*time.Second)
+	var pausedBatch *store.Batch
+	for i := range snap.Batches {
+		if snap.Batches[i].Phase == "paused" {
+			pausedBatch = &snap.Batches[i]
+		}
+	}
+	if pausedBatch == nil {
+		t.Fatal("no paused batch after review pause")
+	}
+	for _, m := range pausedBatch.Members {
+		if m.HealthState != "healthy" {
+			t.Fatalf("review evidence incomplete: %s = %s", m.InstanceID, m.HealthState)
+		}
+	}
+	code, _ = e.do(t, http.MethodPost, "/api/releases/"+rel.ID+"/continue", "")
+	if code != 202 {
+		t.Fatalf("continue status = %d", code)
+	}
+	snap = e.tickUntil(t, "succeeded", 10*time.Second)
+	for _, inst := range snap.Instances {
+		if inst.CurrentVersion != "v2.0.0" {
+			t.Fatalf("instance %s on %s after continue", inst.ID, inst.CurrentVersion)
+		}
+	}
+}

@@ -134,12 +134,18 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 	// or a later release to a newer version) the result is recorded stale and
 	// can never be attributed to the next version.
 	movedOn := inst != nil && inst.CurrentVersion != op.ResolveVersion
-	if terminal || m.LastResolvedKey == key || m.UpdateState == "rolled_back" || m.UpdateState == "rollback_in_progress" || b.Phase == "rolling_back" || m.ToVersion != op.ResolveVersion || movedOn {
-		if !terminal {
-			m.HealthState = "stale"
-			m.Message = "健康结果迟到：实例已不在该版本，结果作废，不计入后续版本"
-			tx.AddEvent(nowStr(now), op.ReleaseID, op.BatchID, op.InstanceID, "warn", "迟到的健康结果被忽略（期望版本 "+op.ResolveVersion+"），未归入任何后续版本")
-		}
+	if terminal {
+		// A terminal decision (healthy/unhealthy/stale, or an already
+		// rolled-back/cancelled member) is final: the late result stays
+		// queryable in the event log but must not change any state.
+		tx.AddEvent(nowStr(now), op.ReleaseID, op.BatchID, op.InstanceID, "info",
+			"健康结果在终止决定之后到达（版本 "+op.ResolveVersion+"），仅留档可查，不改变已确定的状态")
+		return
+	}
+	if m.LastResolvedKey == key || m.UpdateState == "rolled_back" || m.UpdateState == "rollback_in_progress" || b.Phase == "rolling_back" || m.ToVersion != op.ResolveVersion || movedOn {
+		m.HealthState = "stale"
+		m.Message = "健康结果迟到：实例已不在该版本，结果作废，不计入后续版本"
+		tx.AddEvent(nowStr(now), op.ReleaseID, op.BatchID, op.InstanceID, "warn", "迟到的健康结果被忽略（期望版本 "+op.ResolveVersion+"），未归入任何后续版本")
 		return
 	}
 	healthy := true

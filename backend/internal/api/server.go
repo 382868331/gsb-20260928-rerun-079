@@ -31,6 +31,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/releases/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /api/releases/{id}/resume", s.handleResume)
 	mux.HandleFunc("POST /api/releases/{id}/finish", s.handleFinish)
+	mux.HandleFunc("POST /api/releases/{id}/pause", s.handlePause)
+	mux.HandleFunc("POST /api/releases/{id}/continue", s.handleContinue)
+	mux.HandleFunc("POST /api/releases/{id}/shrink", s.handleShrink)
+	mux.HandleFunc("POST /api/releases/{id}/rollback", s.handleRollback)
 	mux.HandleFunc("POST /api/versions", s.handleCreateVersion)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
@@ -39,13 +43,15 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) snapshot() store.Snapshot {
 	var snap store.Snapshot
 	s.st.View(func(tx *store.Tx) {
+		// Non-nil slices: empty collections must serialize as [] not null,
+		// otherwise a fresh data directory renders the UI unbootable.
 		snap = store.Snapshot{
-			Versions:  append([]store.Version(nil), tx.Versions()...),
-			Instances: append([]store.Instance(nil), tx.Instances()...),
-			Releases:  append([]store.Release(nil), tx.Releases()...),
-			Batches:   append([]store.Batch(nil), tx.Batches()...),
-			Ops:       append([]store.Op(nil), tx.Ops()...),
-			Events:    append([]store.Event(nil), tx.Events()...),
+			Versions:  append([]store.Version{}, tx.Versions()...),
+			Instances: append([]store.Instance{}, tx.Instances()...),
+			Releases:  append([]store.Release{}, tx.Releases()...),
+			Batches:   append([]store.Batch{}, tx.Batches()...),
+			Ops:       append([]store.Op{}, tx.Ops()...),
+			Events:    append([]store.Event{}, tx.Events()...),
 		}
 	})
 	return snap
@@ -154,6 +160,49 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.FinishDrill(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.RequestReviewPause(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.ContinueRelease(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleShrink(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BatchSize int `json:"batchSize"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.svc.ShrinkAndContinue(r.PathValue("id"), req.BatchSize, time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleRollback(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.RollbackRelease(r.PathValue("id"), time.Now()); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

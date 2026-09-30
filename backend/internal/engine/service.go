@@ -151,6 +151,111 @@ func (s *Service) CancelRelease(releaseID string, now time.Time) error {
 	})
 }
 
+// RequestReviewPause asks the release to freeze for manual review as soon as
+// the active batch's health evidence is complete. The request is persisted,
+// so it survives a restart that happens before the batch finishes observing.
+func (s *Service) RequestReviewPause(releaseID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if isReleaseTerminal(rel.Status) {
+			return errors.New("发布已结束，无法请求审查暂停")
+		}
+		if rel.Status == "paused" {
+			return errors.New("发布已处于暂停审查中")
+		}
+		if rel.ReviewRequested {
+			return nil
+		}
+		rel.ReviewRequested = true
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", "已请求人工审查：当前批次健康证据收集完成后将暂停")
+		return nil
+	})
+}
+
+// ContinueRelease resumes a review-paused release: the reviewed batch is
+// marked succeeded and the release moves on to the next batch. Completed
+// batches are never re-executed.
+func (s *Service) ContinueRelease(releaseID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if isReleaseTerminal(rel.Status) {
+			return errors.New("发布已结束")
+		}
+		if rel.Status != "paused" || rel.PauseKind != "review" {
+			return errors.New("仅健康审查暂停中的发布可以继续")
+		}
+		rel.ContinueRequested = true
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", "审查完成，选择继续发布后续批次")
+		return nil
+	})
+}
+
+// ShrinkAndContinue rebuilds the remaining pending batches with a smaller
+// batch size and then continues the release. Finished batches stay untouched.
+func (s *Service) ShrinkAndContinue(releaseID string, batchSize int, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if isReleaseTerminal(rel.Status) {
+			return errors.New("发布已结束")
+		}
+		if rel.Status != "paused" || rel.PauseKind != "review" {
+			return errors.New("仅健康审查暂停中的发布可以缩小批次")
+		}
+		if batchSize < 1 {
+			return errors.New("每批实例数至少为 1")
+		}
+		remaining := 0
+		for i := range tx.Batches() {
+			b := &tx.Batches()[i]
+			if b.ReleaseID == rel.ID && b.Phase == "pending" {
+				remaining += len(b.Members)
+			}
+		}
+		if remaining == 0 {
+			return errors.New("没有未开始的批次可以调整")
+		}
+		if batchSize > remaining {
+			return errors.New("每批实例数不能超过剩余未发布实例数")
+		}
+		rel.ShrinkTo = batchSize
+		rel.ContinueRequested = true
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "info",
+			fmt.Sprintf("审查完成，选择缩小批次到每批 %d 台并继续", batchSize))
+		return nil
+	})
+}
+
+// RollbackRelease ends a review-paused release by rolling every instance
+// that actually moved (across all batches, including already succeeded ones)
+// back to its recorded from-version. Batches that never started are
+// cancelled instead of being expanded.
+func (s *Service) RollbackRelease(releaseID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if isReleaseTerminal(rel.Status) {
+			return errors.New("发布已结束")
+		}
+		if rel.Status != "paused" || rel.PauseKind != "review" {
+			return errors.New("仅健康审查暂停中的发布可以整体回退")
+		}
+		rel.RollbackAllRequested = true
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "审查完成，选择回退全部已更新实例并结束发布")
+		return nil
+	})
+}
+
 // ResumeRollback continues a paused drill: the paused batch starts its
 // rollback exactly where it was frozen. Persisted ops make a page reopen
 // resume from the same on-disk state.

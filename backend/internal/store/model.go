@@ -63,9 +63,18 @@ type Release struct {
 	CancelRequested bool        `json:"cancelRequested"`
 	ResumeRequested bool        `json:"resumeRequested"`
 	FinishRequested bool        `json:"finishRequested"`
-	CreatedAt       string      `json:"createdAt"`
-	FinishedAt      string      `json:"finishedAt,omitempty"`
-	Message         string      `json:"message,omitempty"`
+	// Review pause flags: an operator asks to freeze the release once the
+	// active batch's health evidence is complete, then chooses to continue,
+	// shrink the remaining batches or roll everything back. All flags are
+	// persisted so a restart keeps both the pause and the review decision.
+	ReviewRequested      bool   `json:"reviewRequested"`
+	ContinueRequested    bool   `json:"continueRequested"`
+	RollbackAllRequested bool   `json:"rollbackAllRequested"`
+	ShrinkTo             int    `json:"shrinkTo,omitempty"`
+	PauseKind            string `json:"pauseKind,omitempty"` // failure|review
+	CreatedAt            string `json:"createdAt"`
+	FinishedAt           string `json:"finishedAt,omitempty"`
+	Message              string `json:"message,omitempty"`
 }
 
 // Op is a virtual asynchronous operation with a scheduled due time. All

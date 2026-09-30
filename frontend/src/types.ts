@@ -54,6 +54,11 @@ export interface Release {
   cancelRequested: boolean;
   resumeRequested: boolean;
   finishRequested: boolean;
+  reviewRequested: boolean;
+  continueRequested: boolean;
+  rollbackAllRequested: boolean;
+  shrinkTo?: number;
+  pauseKind?: "failure" | "review";
   createdAt: string;
   finishedAt?: string;
   message?: string;

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Ban, Boxes, GitBranch, ListOrdered, OctagonAlert, Play, RotateCcw, SkipForward } from "lucide-react";
-import { createRelease, cancelRelease, resumeRollback, finishDrill, subscribe } from "./api";
-import type { Batch, Snapshot } from "./types";
+import { Activity, Ban, Boxes, GitBranch, ListOrdered, OctagonAlert, PauseCircle, Play, RotateCcw, Shrink, SkipForward } from "lucide-react";
+import { createRelease, cancelRelease, resumeRollback, finishDrill, pauseRelease, continueRelease, shrinkRelease, rollbackRelease, subscribe } from "./api";
+import type { Batch, Release, Snapshot } from "./types";
 
 const phaseLabel: Record<string, string> = {
   pending: "等待",
@@ -36,6 +36,7 @@ function timeShort(iso?: string): string {
 export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string>("");
+  const [loadError, setLoadError] = useState<string>("");
   const [target, setTarget] = useState("v2.0.0");
   const [batchSize, setBatchSize] = useState(2);
   const [mode, setMode] = useState("none");
@@ -44,15 +45,40 @@ export function App() {
   const [strategy, setStrategy] = useState("rolling");
   const [pauseOnFailure, setPauseOnFailure] = useState(true);
 
-  useEffect(() => subscribe(setSnap), []);
+  useEffect(
+    () =>
+      subscribe(
+        (s) => {
+          setSnap(s);
+          setLoadError("");
+        },
+        (m) => setLoadError(m)
+      ),
+    []
+  );
 
   const activeRelease = useMemo(
-    () => snap?.releases.find((r) => !["succeeded", "rolled_back", "cancelled", "failed"].includes(r.status)),
+    () => (snap?.releases ?? []).find((r) => !["succeeded", "rolled_back", "cancelled", "failed"].includes(r.status)),
     [snap]
   );
-  const latestRelease = snap?.releases[snap.releases.length - 1];
+  const releases = snap?.releases ?? [];
+  const latestRelease = releases[releases.length - 1];
 
-  if (!snap) return <div className="loading">正在加载演练状态…</div>;
+  if (!snap) {
+    if (loadError) {
+      return (
+        <div className="loading">
+          <div className="load-failure">
+            <h2>无法连接演练平台后端</h2>
+            <p>{loadError}</p>
+            <p className="hint">这不是空数据：后端未启动或接口异常时不会展示任何模拟状态。</p>
+            <button className="primary" onClick={() => window.location.reload()}>重试</button>
+          </div>
+        </div>
+      );
+    }
+    return <div className="loading">正在加载演练状态…</div>;
+  }
 
   const submit = async () => {
     setError("");
@@ -89,6 +115,9 @@ export function App() {
           <table>
             <thead><tr><th>版本</th><th>名称</th><th>构建时间</th></tr></thead>
             <tbody>
+              {snap.versions.length === 0 && (
+                <tr><td colSpan={3} className="empty-cell">暂无版本记录</td></tr>
+              )}
               {snap.versions.map((v) => (
                 <tr key={v.id} className={v.id === target ? "selected" : ""}>
                   <td><code>{v.id}</code></td><td>{v.name}</td><td>{timeShort(v.createdAt)}</td>
@@ -103,6 +132,9 @@ export function App() {
           <table>
             <thead><tr><th>实例</th><th>当前版本</th><th>期望归宿</th><th>健康</th></tr></thead>
             <tbody>
+              {snap.instances.length === 0 && (
+                <tr><td colSpan={4} className="empty-cell">暂无虚拟实例</td></tr>
+              )}
               {snap.instances.map((i) => (
                 <tr key={i.id}>
                   <td>{i.name}</td>
@@ -157,19 +189,36 @@ export function App() {
             失败后暂停，审查失败实例再决定继续回退或结束
           </label>
           <div className="actions">
-            <button className="primary" onClick={submit} disabled={!!activeRelease}>开始按批次发布</button>
+            <button className="primary" onClick={submit} disabled={!!activeRelease || snap.versions.length === 0 || snap.instances.length === 0}>
+              开始按批次发布
+            </button>
+            {activeRelease && activeRelease.status === "in_progress" && !activeRelease.reviewRequested && (
+              <button onClick={() => pauseRelease(activeRelease.id).catch((e) => setError(e.message))}>
+                <PauseCircle size={15} /> 本批完成后暂停审查
+              </button>
+            )}
             {activeRelease && (
               <button className="danger" onClick={() => cancelRelease(activeRelease.id).catch((e) => setError(e.message))}>
                 <Ban size={15} /> 取消发布
               </button>
             )}
           </div>
+          {activeRelease?.reviewRequested && activeRelease.status !== "paused" && (
+            <p className="hint">已请求审查暂停：当前批次健康证据收集完成后将自动暂停。</p>
+          )}
           {error && <p className="error">{error}</p>}
           <p className="hint">取消后不会再扩到后续批次；当前批次中已更新实例会明确回退到原版本。</p>
         </div>
       </section>
 
-      <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />
+      {snap.instances.length > 0 && <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />}
+
+      {!shownRelease && (
+        <section className="card empty-state">
+          <h2><ListOrdered size={18} /> 发布记录</h2>
+          <p className="sub">暂无发布记录。这是空状态而非加载失败：在上方选择目标版本与策略，创建第一个演练发布。</p>
+        </section>
+      )}
 
       {shownRelease && (
         <section className="card release">
@@ -180,7 +229,10 @@ export function App() {
             目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baseline}</code>，
             策略 {shownRelease.strategy}，每批 {shownRelease.batchSize} 台 · {shownRelease.message ?? "进行中，所有进度实时持久化"}
           </p>
-          {shownRelease.status === "paused" && (
+          {shownRelease.status === "paused" && shownRelease.pauseKind === "review" && (
+            <HealthReview snap={snap} release={shownRelease} onError={setError} />
+          )}
+          {shownRelease.status === "paused" && shownRelease.pauseKind !== "review" && (
             <PausedReview snap={snap} release={shownRelease} onError={setError} />
           )}
           <div className="batches">
@@ -192,6 +244,7 @@ export function App() {
       <section className="card events">
         <h2>操作过程（事件流）</h2>
         <div className="event-list">
+          {snap.events.length === 0 && <div className="event lv-info"><span className="m">暂无事件</span></div>}
           {[...snap.events].reverse().slice(0, 60).map((e) => (
             <div key={e.seq} className={"event lv-" + e.level}>
               <span className="t">{timeShort(e.at)}</span>
@@ -247,6 +300,66 @@ function PausedReview({
         </button>
         <button className="danger" onClick={() => finishDrill(release.id).catch((e) => onError(e.message))}>
           <SkipForward size={15} /> 结束本次演练（保留当前版本分布）
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// HealthReview is shown when a release is paused for manual review after a
+// batch's health evidence completed. The operator inspects the persisted
+// evidence, then chooses to continue, shrink the remaining batches, or roll
+// back everything that moved.
+function HealthReview({
+  snap,
+  release,
+  onError,
+}: {
+  snap: Snapshot;
+  release: Release;
+  onError: (m: string) => void;
+}) {
+  const [shrinkTo, setShrinkTo] = useState(1);
+  const relBatches = snap.batches.filter((b) => b.releaseId === release.id).sort((a, b) => a.index - b.index);
+  const pausedBatch = relBatches.find((b) => b.phase === "paused");
+  const doneBatches = relBatches.filter((b) => b.phase === "succeeded");
+  const pendingBatches = relBatches.filter((b) => b.phase === "pending");
+  const remaining = pendingBatches.reduce((n, b) => n + b.members.length, 0);
+  const updatedCount = snap.instances.filter((i) => i.currentVersion === release.targetVersion).length;
+  const evidence = pausedBatch?.members ?? [];
+  return (
+    <div className="review">
+      <h3><PauseCircle size={16} /> 人工审查：第 {pausedBatch ? pausedBatch.index + 1 : "-"} 批健康证据已就绪</h3>
+      <p className="sub">
+        以下健康证据来自持久化的真实运行记录；刷新或重开页面后审查状态与选择保持不变。
+        已完成 {doneBatches.length + (pausedBatch ? 1 : 0)} 批，{updatedCount} 台实例已在新版本，剩余 {remaining} 台未发布。
+      </p>
+      <ul className="review-list">
+        {evidence.map((m) => (
+          <li key={m.instanceId} className={m.healthState === "healthy" ? "new" : "bad"}>
+            <code>{m.instanceId}</code> {m.fromVersion} → {m.toVersion}：
+            {m.healthState === "healthy" ? "健康检查通过" : m.message || "健康证据异常"}
+            {m.message && m.healthState === "healthy" ? "（" + m.message + "）" : ""}
+          </li>
+        ))}
+      </ul>
+      <div className="actions">
+        <button className="primary" onClick={() => continueRelease(release.id).catch((e) => onError(e.message))}>
+          <Play size={15} /> 继续发布下一批
+        </button>
+        {remaining > 0 && (
+          <span className="shrink-box">
+            <input
+              type="number" min={1} max={remaining} value={shrinkTo}
+              onChange={(e) => setShrinkTo(Number(e.target.value))}
+            />
+            <button onClick={() => shrinkRelease(release.id, shrinkTo).catch((e) => onError(e.message))}>
+              <Shrink size={15} /> 缩小批次并继续
+            </button>
+          </span>
+        )}
+        <button className="danger" onClick={() => rollbackRelease(release.id).catch((e) => onError(e.message))}>
+          <RotateCcw size={15} /> 回退全部已更新实例
         </button>
       </div>
     </div>
