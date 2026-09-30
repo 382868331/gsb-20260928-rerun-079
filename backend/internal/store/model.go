@@ -48,6 +48,7 @@ type FailureSpec struct {
 	Mode               string   `json:"mode"` // none|half_batch|instances|rollback_interrupt
 	Instances          []string `json:"instances,omitempty"`
 	FailFirstNRollback int      `json:"failFirstNRollback,omitempty"`
+	PauseOnFailure     bool     `json:"pauseOnFailure,omitempty"`
 }
 
 type Release struct {
@@ -57,9 +58,11 @@ type Release struct {
 	Strategy        string      `json:"strategy"` // rolling
 	BatchSize       int         `json:"batchSize"`
 	BatchIDs        []string    `json:"batchIds"`
-	Status          string      `json:"status"` // pending|in_progress|succeeded|failed|cancelling|rolled_back|cancelled
+	Status          string      `json:"status"` // pending|in_progress|paused|succeeded|failed|cancelling|rolling_back|rolled_back|cancelled
 	Failure         FailureSpec `json:"failure"`
 	CancelRequested bool        `json:"cancelRequested"`
+	ResumeRequested bool        `json:"resumeRequested"`
+	FinishRequested bool        `json:"finishRequested"`
 	CreatedAt       string      `json:"createdAt"`
 	FinishedAt      string      `json:"finishedAt,omitempty"`
 	Message         string      `json:"message,omitempty"`

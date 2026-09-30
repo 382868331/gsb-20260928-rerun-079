@@ -274,6 +274,157 @@ func TestCancelStopsExpansionAndRollbacksUpdated(t *testing.T) {
 	}
 }
 
+// Scenario 5: with pauseOnFailure the release freezes on the failed member so
+// an operator can review, then resumes the rollback. The page may be closed
+// and reopened meanwhile; state comes entirely from disk.
+func TestPauseReviewThenResumeRollback(t *testing.T) {
+	dir := t.TempDir()
+	svc := newService(t, dir)
+	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
+		TargetVersion: "v2.0.0", BatchSize: 2,
+		Failure: store.FailureSpec{Mode: "half_batch", PauseOnFailure: true},
+	}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := t0
+	runUntil(t, svc, &now, 2*time.Second)
+
+	st := snapshotStore(t, dir)
+	var r store.Release
+	var batches []store.Batch
+	var ops []store.Op
+	st.View(func(tx *store.Tx) {
+		r = tx.Releases()[0]
+		batches = append([]store.Batch(nil), tx.Batches()...)
+		ops = append([]store.Op(nil), tx.Ops()...)
+	})
+	if r.Status != "paused" {
+		t.Fatalf("status = %s, want paused", r.Status)
+	}
+	if batches[0].Phase != "paused" {
+		t.Fatalf("batch phase = %s, want paused", batches[0].Phase)
+	}
+	for _, op := range ops {
+		if op.Kind == "rollback" {
+			t.Fatal("no rollback op must be scheduled while the drill is paused")
+		}
+	}
+	if batches[1].Phase != "pending" {
+		t.Fatalf("later batch phase = %s, want pending", batches[1].Phase)
+	}
+
+	// Reopen (simulating refresh/restart): the pause is still there.
+	svc2 := newService(t, dir)
+	snapshotStore(t, dir).View(func(tx *store.Tx) {
+		if tx.Releases()[0].Status != "paused" {
+			t.Fatal("pause must survive reopen")
+		}
+	})
+
+	if err := svc2.ResumeRollback(rel.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	runUntil(t, svc2, &now, 2*time.Second)
+
+	var rel2 store.Release
+	var insts []store.Instance
+	st2 := snapshotStore(t, dir)
+	st2.View(func(tx *store.Tx) {
+		rel2 = tx.Releases()[0]
+		insts = append([]store.Instance(nil), tx.Instances()...)
+		batches = append([]store.Batch(nil), tx.Batches()...)
+	})
+	if rel2.Status != "rolled_back" {
+		t.Fatalf("after resume status = %s, want rolled_back", rel2.Status)
+	}
+	if batches[1].Phase != "pending" {
+		t.Fatalf("later batches must remain pending: %s", batches[1].Phase)
+	}
+	for _, inst := range insts {
+		if inst.CurrentVersion != "v1.0.0" {
+			t.Fatalf("instance %s = %s, want v1.0.0", inst.ID, inst.CurrentVersion)
+		}
+	}
+}
+
+// Scenario 6: review and end the drill without rollback keeps the real mixed
+// version distribution (half the batch on v2, half never moved).
+func TestPauseReviewThenFinishKeepsDistribution(t *testing.T) {
+	dir := t.TempDir()
+	svc := newService(t, dir)
+	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
+		TargetVersion: "v2.0.0", BatchSize: 2,
+		Failure: store.FailureSpec{Mode: "half_batch", PauseOnFailure: true},
+	}, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := t0
+	runUntil(t, svc, &now, 2*time.Second)
+
+	var before []store.Instance
+	snapshotStore(t, dir).View(func(tx *store.Tx) {
+		before = append([]store.Instance(nil), tx.Instances()...)
+	})
+	v2Before := 0
+	unhealthy := 0
+	for _, inst := range before {
+		if inst.CurrentVersion == "v2.0.0" {
+			v2Before++
+		}
+	}
+	for _, inst := range before {
+		if inst.Health == "unhealthy" {
+			unhealthy++
+		}
+	}
+	if v2Before != 2 || unhealthy != 1 {
+		t.Fatalf("during pause v2=%d unhealthy=%d, want 2 and 1", v2Before, unhealthy)
+	}
+
+	if err := svc.FinishDrill(rel.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	runUntil(t, svc, &now, 1*time.Second)
+
+	st := snapshotStore(t, dir)
+	var r store.Release
+	var insts []store.Instance
+	var batches []store.Batch
+	var ops []store.Op
+	st.View(func(tx *store.Tx) {
+		r = tx.Releases()[0]
+		insts = append([]store.Instance(nil), tx.Instances()...)
+		batches = append([]store.Batch(nil), tx.Batches()...)
+		ops = append([]store.Op(nil), tx.Ops()...)
+	})
+	if r.Status != "failed" {
+		t.Fatalf("status = %s, want failed", r.Status)
+	}
+	if batches[0].Phase != "failed" {
+		t.Fatalf("batch0 = %s, want failed", batches[0].Phase)
+	}
+	v2After := 0
+	for _, inst := range insts {
+		switch inst.CurrentVersion {
+		case "v2.0.0":
+			v2After++
+		case "v1.0.0":
+		default:
+			t.Fatalf("unexpected version %s", inst.CurrentVersion)
+		}
+	}
+	if v2After != v2Before {
+		t.Fatalf("finishing changed the distribution: v2 count %d -> %d", v2Before, v2After)
+	}
+	if len(ops) != 0 {
+		t.Fatalf("no rollback ops expected after finish, got %d", len(ops))
+	}
+}
+
 func runUntil(t *testing.T, svc *engine.Service, now *time.Time, d time.Duration) {
 	t.Helper()
 	deadline := now.Add(d)

@@ -134,7 +134,7 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 	// or a later release to a newer version) the result is recorded stale and
 	// can never be attributed to the next version.
 	movedOn := inst != nil && inst.CurrentVersion != op.ResolveVersion
-	if terminal || m.LastResolvedKey == key || m.UpdateState == "rolled_back" || m.ToVersion != op.ResolveVersion || movedOn {
+	if terminal || m.LastResolvedKey == key || m.UpdateState == "rolled_back" || m.UpdateState == "rollback_in_progress" || b.Phase == "rolling_back" || m.ToVersion != op.ResolveVersion || movedOn {
 		if !terminal {
 			m.HealthState = "stale"
 			m.Message = "健康结果迟到：实例已不在该版本，结果作废，不计入后续版本"

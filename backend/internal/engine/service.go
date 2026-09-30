@@ -87,6 +87,11 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 			return errors.New("没有虚拟实例")
 		}
 		baseline := insts[0].DesiredVersion
+		for _, inst := range insts {
+			if inst.CurrentVersion != insts[0].CurrentVersion {
+				return errors.New("实例当前版本不一致，请先统一基线后再发布")
+			}
+		}
 		rel := store.Release{
 			ID: newID(tx, "rel"), TargetVersion: target.ID, Baseline: baseline,
 			Strategy: req.Strategy, BatchSize: req.BatchSize, Status: "pending",
@@ -94,8 +99,12 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		}
 		var batches []store.Batch
 		idx := 0
-		for start := 0; start < len(insts); start += req.BatchSize {
-			end := start + req.BatchSize
+		size := req.BatchSize
+		if req.Strategy == "all_at_once" {
+			size = len(insts)
+		}
+		for start := 0; start < len(insts); start += size {
+			end := start + size
 			if end > len(insts) {
 				end = len(insts)
 			}
@@ -138,6 +147,47 @@ func (s *Service) CancelRelease(releaseID string, now time.Time) error {
 		rel.CancelRequested = true
 		rel.Status = "cancelling"
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "收到取消请求：停止继续扩批，当前批次将整体回退")
+		return nil
+	})
+}
+
+// ResumeRollback continues a paused drill: the paused batch starts its
+// rollback exactly where it was frozen. Persisted ops make a page reopen
+// resume from the same on-disk state.
+func (s *Service) ResumeRollback(releaseID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if isReleaseTerminal(rel.Status) {
+			return errors.New("发布已结束")
+		}
+		if rel.Status != "paused" {
+			return errors.New("仅暂停审查中的发布可以继续回退")
+		}
+		rel.ResumeRequested = true
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", "审查完成，选择继续回退")
+		return nil
+	})
+}
+
+// FinishDrill ends a paused drill without rolling back, keeping every
+// instance on its current (verified on disk) version.
+func (s *Service) FinishDrill(releaseID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		rel := findRelease(tx, releaseID)
+		if rel == nil {
+			return errors.New("发布不存在")
+		}
+		if isReleaseTerminal(rel.Status) {
+			return errors.New("发布已结束")
+		}
+		if rel.Status != "paused" {
+			return errors.New("仅暂停审查中的发布可以结束演练")
+		}
+		rel.FinishRequested = true
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "人工审查后选择结束本次演练，保留当前版本分布")
 		return nil
 	})
 }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, Ban, Boxes, GitBranch, ListOrdered, Play } from "lucide-react";
-import { createRelease, cancelRelease, subscribe } from "./api";
+import { Activity, Ban, Boxes, GitBranch, ListOrdered, OctagonAlert, Play, RotateCcw, SkipForward } from "lucide-react";
+import { createRelease, cancelRelease, resumeRollback, finishDrill, subscribe } from "./api";
 import type { Batch, Snapshot } from "./types";
 
 const phaseLabel: Record<string, string> = {
@@ -10,6 +10,7 @@ const phaseLabel: Record<string, string> = {
   succeeded: "成功",
   failed: "失败",
   cancelling: "取消中",
+  paused: "暂停待审查",
   rolling_back: "回退中",
   rolled_back: "已回退",
   cancelled: "已取消",
@@ -21,6 +22,8 @@ const releaseLabel: Record<string, string> = {
   succeeded: "发布成功",
   failed: "失败",
   cancelling: "取消中",
+  paused: "暂停待审查",
+  rolling_back: "回退中",
   rolled_back: "失败已回退",
   cancelled: "已取消",
 };
@@ -38,6 +41,8 @@ export function App() {
   const [mode, setMode] = useState("none");
   const [failInstances, setFailInstances] = useState("inst-1,inst-2");
   const [rollbackN, setRollbackN] = useState(2);
+  const [strategy, setStrategy] = useState("rolling");
+  const [pauseOnFailure, setPauseOnFailure] = useState(true);
 
   useEffect(() => subscribe(setSnap), []);
 
@@ -55,11 +60,12 @@ export function App() {
       await createRelease({
         targetVersion: target,
         batchSize: Number(batchSize),
-        strategy: "rolling",
+        strategy: strategy as "rolling" | "all_at_once",
         failure: {
           mode: mode as Snapshot["releases"][number]["failure"]["mode"],
           instances: mode === "instances" ? failInstances.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
           failFirstNRollback: mode === "rollback_interrupt" ? Number(rollbackN) : undefined,
+          pauseOnFailure,
         },
       });
     } catch (e) {
@@ -116,9 +122,15 @@ export function App() {
               {snap.versions.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}
             </select>
           </label>
+          <label>发布策略
+            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={!!activeRelease}>
+              <option value="rolling">分批滚动（按批次逐步扩批）</option>
+              <option value="all_at_once">全量一次性（全部实例同批）</option>
+            </select>
+          </label>
           <label>每批实例数
             <input type="number" min={1} max={snap.instances.length} value={batchSize}
-              disabled={!!activeRelease} onChange={(e) => setBatchSize(Number(e.target.value))} />
+              disabled={!!activeRelease || strategy === "all_at_once"} onChange={(e) => setBatchSize(Number(e.target.value))} />
           </label>
           <label>故障注入
             <select value={mode} onChange={(e) => setMode(e.target.value)} disabled={!!activeRelease}>
@@ -139,10 +151,15 @@ export function App() {
                 onChange={(e) => setRollbackN(Number(e.target.value))} />
             </label>
           )}
+          <label className="check">
+            <input type="checkbox" checked={pauseOnFailure} disabled={!!activeRelease}
+              onChange={(e) => setPauseOnFailure(e.target.checked)} />
+            失败后暂停，审查失败实例再决定继续回退或结束
+          </label>
           <div className="actions">
             <button className="primary" onClick={submit} disabled={!!activeRelease}>开始按批次发布</button>
             {activeRelease && (
-              <button className="danger" onClick={() => cancelRelease(activeRelease.id)}>
+              <button className="danger" onClick={() => cancelRelease(activeRelease.id).catch((e) => setError(e.message))}>
                 <Ban size={15} /> 取消发布
               </button>
             )}
@@ -152,15 +169,20 @@ export function App() {
         </div>
       </section>
 
+      <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />
+
       {shownRelease && (
         <section className="card release">
           <h2><ListOrdered size={18} /> 发布 {shownRelease.id}
             <span className={"pill r-" + shownRelease.status}>{releaseLabel[shownRelease.status] ?? shownRelease.status}</span>
           </h2>
           <p className="sub">
-            目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baselineVersion}</code>，
+            目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baseline}</code>，
             策略 {shownRelease.strategy}，每批 {shownRelease.batchSize} 台 · {shownRelease.message ?? "进行中，所有进度实时持久化"}
           </p>
+          {shownRelease.status === "paused" && (
+            <PausedReview snap={snap} release={shownRelease} onError={setError} />
+          )}
           <div className="batches">
             {batches.map((b) => <BatchView key={b.id} batch={b} ops={snap.ops} />)}
           </div>
@@ -179,6 +201,98 @@ export function App() {
         </div>
       </section>
     </div>
+  );
+}
+
+function PausedReview({
+  snap,
+  release,
+  onError,
+}: {
+  snap: Snapshot;
+  release: Snapshot["releases"][number];
+  onError: (m: string) => void;
+}) {
+  const pausedBatch = snap.batches
+    .filter((b) => b.releaseId === release.id && b.phase === "paused")
+    .sort((a, b) => a.index - b.index)[0];
+  const members = pausedBatch?.members ?? [];
+  const failed = members.filter((m) => m.updateState === "failed" || m.healthState === "unhealthy");
+  const onNew = members.filter((m) => m.updateState === "succeeded" && m.healthState !== "unhealthy");
+  const stillOld = members.filter((m) => m.updateState !== "succeeded");
+  return (
+    <div className="review">
+      <h3><OctagonAlert size={16} /> 暂停审查：第 {pausedBatch ? pausedBatch.index + 1 : "-"} 批出现失败实例</h3>
+      <p className="sub">实例状态来自持久化的真实运行记录，刷新或重新打开页面仍停在该状态，审查后再决定走向。</p>
+      <ul className="review-list">
+        {failed.map((m) => (
+          <li key={m.instanceId} className="bad">
+            <code>{m.instanceId}</code> 失败：{m.message || "更新或健康检查失败"}
+          </li>
+        ))}
+        {onNew.map((m) => (
+          <li key={m.instanceId} className="new">
+            <code>{m.instanceId}</code> 已在新版本 <code>{m.toVersion}</code>，回退会返回 <code>{m.fromVersion}</code>
+          </li>
+        ))}
+        {stillOld.map((m) => (
+          <li key={m.instanceId} className="old">
+            <code>{m.instanceId}</code> 未离开原版本 <code>{m.fromVersion}</code>
+          </li>
+        ))}
+      </ul>
+      <div className="actions">
+        <button className="primary" onClick={() => resumeRollback(release.id).catch((e) => onError(e.message))}>
+          <RotateCcw size={15} /> 继续回退本批
+        </button>
+        <button className="danger" onClick={() => finishDrill(release.id).catch((e) => onError(e.message))}>
+          <SkipForward size={15} /> 结束本次演练（保留当前版本分布）
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// VersionDistribution counts versions across real instance records. Instances
+// still marked rollback_in_progress are reported separately so a rolling-back
+// instance is never counted as a finished rollback (or as a successful new
+// version) on a fake progress bar.
+function VersionDistribution({ snap, batches }: { snap: Snapshot; batches: Batch[] }) {
+  const memberByInstance = new Map<string, Snapshot["batches"][number]["members"][number]>();
+  for (const b of batches) {
+    for (const m of b.members) memberByInstance.set(m.instanceId, m);
+  }
+  const counts = new Map<string, number>();
+  let rolling = 0;
+  for (const inst of snap.instances) {
+    const m = memberByInstance.get(inst.id);
+    if (m?.updateState === "rollback_in_progress") {
+      rolling++;
+      continue;
+    }
+    counts.set(inst.currentVersion, (counts.get(inst.currentVersion) ?? 0) + 1);
+  }
+  const total = snap.instances.length;
+  return (
+    <section className="card">
+      <h2><GitBranch size={18} /> 真实版本分布（按实例当前版本统计，共 {total} 台）</h2>
+      <div className="dist">
+        {[...counts.entries()].map(([v, n]) => (
+          <div key={v} className="dist-row">
+            <code>{v}</code>
+            <div className="bar"><div className="fill" style={{ width: `${(n / total) * 100}%` }} /></div>
+            <span className="num">{n} 台</span>
+          </div>
+        ))}
+        {rolling > 0 && (
+          <div className="dist-row">
+            <code className="muted">回退中（归宿未定）</code>
+            <div className="bar"><div className="fill rolling-fill" style={{ width: `${(rolling / total) * 100}%` }} /></div>
+            <span className="num">{rolling} 台</span>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -234,4 +348,3 @@ function healthLabel(s: string): string {
   };
   return m[s] ?? s;
 }
-

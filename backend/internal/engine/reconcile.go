@@ -84,6 +84,10 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		// 1. update failure -> rollback the whole batch.
 		for i := range b.Members {
 			if b.Members[i].UpdateState == "failed" {
+				if rel.Failure.PauseOnFailure && !rel.ResumeRequested && !rel.CancelRequested {
+					e.pauseBatch(tx, rel, b, now, "存在更新失败的实例")
+					return true
+				}
 				e.startBatchRollback(tx, rel, b, now, "批次内存在更新失败的实例")
 				return true
 			}
@@ -91,6 +95,10 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		// 2. unhealthy observation -> rollback.
 		for i := range b.Members {
 			if b.Members[i].HealthState == "unhealthy" {
+				if rel.Failure.PauseOnFailure && !rel.ResumeRequested && !rel.CancelRequested {
+					e.pauseBatch(tx, rel, b, now, "健康观察未通过")
+					return true
+				}
 				e.startBatchRollback(tx, rel, b, now, "健康观察未通过")
 				return true
 			}
@@ -129,6 +137,23 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		}
 		return false
 
+	case "paused":
+		// Drill paused after a failed member: an operator reviews the failed
+		// instances, then either resumes the rollback or ends the drill while
+		// keeping the live version distribution in place.
+		switch {
+		case rel.ResumeRequested || rel.CancelRequested:
+			rel.ResumeRequested = false
+			e.startBatchRollback(tx, rel, b, now, "审查完成，继续批次回退")
+			return true
+		case rel.FinishRequested:
+			b.Phase = "failed"
+			b.FinishedAt = nowStr(now)
+			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "error", "审查后结束本次演练：保留当前版本分布，不执行回退")
+			return true
+		}
+		return false
+
 	case "rolling_back":
 		for i := range b.Members {
 			if b.Members[i].UpdateState == "rollback_in_progress" {
@@ -151,6 +176,7 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 
 func (e *Engine) startBatchRollback(tx *store.Tx, rel *store.Release, b *store.Batch, now time.Time, reason string) {
 	b.Phase = "rolling_back"
+	rel.Status = "rolling_back"
 	for i := range b.Members {
 		m := &b.Members[i]
 		if m.UpdateState == "rolled_back" || m.UpdateState == "rollback_in_progress" {
@@ -176,6 +202,16 @@ func (e *Engine) startBatchRollback(tx *store.Tx, rel *store.Release, b *store.B
 		}
 	}
 	tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 开始回退："+reason)
+}
+
+// pauseBatch freezes the batch the moment a member fails so an operator can
+// inspect which instances are on the new version and which stayed put. No
+// rollback op is scheduled until the rollback is explicitly resumed.
+func (e *Engine) pauseBatch(tx *store.Tx, rel *store.Release, b *store.Batch, now time.Time, reason string) {
+	b.Phase = "paused"
+	rel.Status = "paused"
+	rel.Message = "已暂停：可审查失败实例，再选择继续回退或结束本次演练"
+	tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 因"+reason+"暂停，等待人工审查")
 }
 
 func (e *Engine) finishRelease(tx *store.Tx, rel *store.Release, batches []*store.Batch, now time.Time) {
@@ -208,9 +244,29 @@ func (e *Engine) finishRelease(tx *store.Tx, rel *store.Release, batches []*stor
 		rel.Message = "已取消：后续批次未扩批，已更新实例全部回退"
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "发布已取消，实例归宿均为原版本")
 	default:
-		rel.Status = "rolled_back"
-		rel.Message = "发布失败：失败批次已回退，后续批次未开始"
-		tx.AddEvent(nowStr(now), rel.ID, "", "", "error", "发布失败并完成回退")
+		endedAfterReview := false
+		for _, b := range batches {
+			if b.Phase == "failed" {
+				endedAfterReview = true
+			}
+		}
+		if endedAfterReview {
+			// Operator ended the drill without rollback: untouched batches are
+			// marked cancelled (they never expanded), live versions are kept.
+			for _, b := range batches {
+				if b.Phase == "pending" {
+					b.Phase = "cancelled"
+					b.FinishedAt = nowStr(now)
+				}
+			}
+			rel.Status = "failed"
+			rel.Message = "审查后结束：保留当前真实版本分布，未继续回退，后续批次未扩批"
+			tx.AddEvent(nowStr(now), rel.ID, "", "", "error", "演练已结束，实例版本分布保持暂停时的真实状态")
+		} else {
+			rel.Status = "rolled_back"
+			rel.Message = "发布失败：失败批次已回退，后续批次未开始"
+			tx.AddEvent(nowStr(now), rel.ID, "", "", "error", "发布失败并完成回退")
+		}
 	}
 }
 

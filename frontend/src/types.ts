@@ -28,7 +28,7 @@ export interface Batch {
   id: string;
   releaseId: string;
   index: number;
-  phase: "pending" | "updating" | "observing" | "succeeded" | "failed" | "cancelling" | "rolling_back" | "rolled_back" | "cancelled";
+  phase: "pending" | "updating" | "observing" | "paused" | "succeeded" | "failed" | "cancelling" | "rolling_back" | "rolled_back" | "cancelled";
   targetVersion: string;
   members: MemberState[];
   startedAt?: string;
@@ -39,18 +39,21 @@ export interface FailureSpec {
   mode: "none" | "half_batch" | "instances" | "rollback_interrupt";
   instances?: string[];
   failFirstNRollback?: number;
+  pauseOnFailure?: boolean;
 }
 
 export interface Release {
   id: string;
   targetVersion: string;
-  baselineVersion: string;
+  baseline: string;
   strategy: string;
   batchSize: number;
   batchIds: string[];
-  status: "pending" | "in_progress" | "succeeded" | "failed" | "cancelling" | "rolled_back" | "cancelled";
+  status: "pending" | "in_progress" | "paused" | "succeeded" | "failed" | "cancelling" | "rolling_back" | "rolled_back" | "cancelled";
   failure: FailureSpec;
   cancelRequested: boolean;
+  resumeRequested: boolean;
+  finishRequested: boolean;
   createdAt: string;
   finishedAt?: string;
   message?: string;
@@ -87,4 +90,3 @@ export interface Snapshot {
   ops: Op[];
   events: Event[];
 }
-

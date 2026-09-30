@@ -24,7 +24,27 @@ export async function createRelease(req: {
 }
 
 export async function cancelRelease(id: string): Promise<void> {
-  await fetch(`/api/releases/${id}/cancel`, { method: "POST" });
+  const res = await fetch(`/api/releases/${id}/cancel`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "取消发布失败");
+  }
+}
+
+export async function resumeRollback(id: string): Promise<void> {
+  const res = await fetch(`/api/releases/${id}/resume`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "继续回退失败");
+  }
+}
+
+export async function finishDrill(id: string): Promise<void> {
+  const res = await fetch(`/api/releases/${id}/finish`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "结束演练失败");
+  }
 }
 
 // Subscribe to live state over SSE. Falls back to polling if the stream
@@ -60,4 +80,3 @@ export function subscribe(onState: (s: Snapshot) => void): () => void {
     if (pollTimer) window.clearInterval(pollTimer);
   };
 }
-
