@@ -22,6 +22,9 @@ export interface MemberState {
   healthState: "pending" | "in_progress" | "healthy" | "unhealthy" | "stale";
   message: string;
   lastResolvedKey: string;
+  lateHealthResult?: "healthy" | "unhealthy";
+  lateHealthVersion?: string;
+  lateHealthAt?: string;
 }
 
 export interface Batch {
@@ -54,6 +57,10 @@ export interface Release {
   cancelRequested: boolean;
   resumeRequested: boolean;
   finishRequested: boolean;
+  pauseRequested?: boolean;
+  reviewAction?: "" | "continue" | "shrink" | "rollback" | "finish" | "cancel";
+  reviewShrinkTo?: number;
+  reviewAt?: string;
   createdAt: string;
   finishedAt?: string;
   message?: string;

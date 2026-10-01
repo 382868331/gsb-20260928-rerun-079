@@ -47,6 +47,51 @@ export async function finishDrill(id: string): Promise<void> {
   }
 }
 
+export async function initEnvironment(): Promise<Snapshot> {
+  const res = await fetch("/api/environment/init", { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "初始化演练环境失败");
+  }
+  return res.json();
+}
+
+export async function pauseForReview(id: string): Promise<void> {
+  const res = await fetch(`/api/releases/${id}/pause`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "暂停发布失败");
+  }
+}
+
+export async function reviewContinue(id: string): Promise<void> {
+  const res = await fetch(`/api/releases/${id}/review/continue`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "继续发布失败");
+  }
+}
+
+export async function reviewShrink(id: string, batchSize: number): Promise<void> {
+  const res = await fetch(`/api/releases/${id}/review/shrink`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ batchSize }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "缩小批次失败");
+  }
+}
+
+export async function reviewRollback(id: string): Promise<void> {
+  const res = await fetch(`/api/releases/${id}/review/rollback`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "审查回退失败");
+  }
+}
+
 // Subscribe to live state over SSE. Falls back to polling if the stream
 // cannot be opened. Either way the server payload is the persisted snapshot,
 // so a page refresh always shows the real on-disk progress.
@@ -64,7 +109,13 @@ export function subscribe(onState: (s: Snapshot) => void): () => void {
   try {
     es = new EventSource("/api/events");
     es.onmessage = (ev) => {
-      if (!stopped) onState(JSON.parse(ev.data));
+      if (stopped) return;
+      try {
+        onState(JSON.parse(ev.data));
+      } catch {
+        es?.close();
+        if (!stopped) pollTimer = window.setInterval(poll, 1000);
+      }
     };
     es.onerror = () => {
       es?.close();

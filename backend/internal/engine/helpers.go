@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -85,8 +87,122 @@ func inAnyBatch(batches []*store.Batch, instanceID string) bool {
 	return false
 }
 
+// rebuildPendingBatches replaces every not-yet-started batch of a release
+// with smaller batches over the instances that no started batch has touched.
+// Finished batches and the currently paused batch are preserved exactly, so a
+// reopen followed by "shrink" never re-executes work that already happened.
+func rebuildPendingBatches(tx *store.Tx, rel *store.Release, size int, now time.Time) error {
+	old := releaseBatches(tx, rel.ID)
+	sortBatches(old)
+	started := map[string]bool{}
+	maxIndex := -1
+	var remaining []string
+	for _, b := range old {
+		if b.Phase != "pending" {
+			maxIndex = b.Index
+			for _, m := range b.Members {
+				started[m.InstanceID] = true
+			}
+		}
+	}
+	for _, b := range old {
+		if b.Phase != "pending" {
+			continue
+		}
+		for _, m := range b.Members {
+			if !started[m.InstanceID] {
+				remaining = append(remaining, m.InstanceID)
+			}
+		}
+	}
+	kept := tx.Batches()[:0]
+	for _, b := range tx.Batches() {
+		if b.ReleaseID == rel.ID && b.Phase == "pending" {
+			continue
+		}
+		kept = append(kept, b)
+	}
+	// Pending batches never have ops, but drop any stale ones defensively.
+	ops := tx.Ops()[:0]
+	pendingIDs := map[string]bool{}
+	for _, b := range old {
+		if b.Phase == "pending" {
+			pendingIDs[b.ID] = true
+		}
+	}
+	for _, op := range tx.Ops() {
+		if !pendingIDs[op.BatchID] {
+			ops = append(ops, op)
+		}
+	}
+	tx.SetOps(ops)
+
+	idx := maxIndex + 1
+	batchIDs := rel.BatchIDs[:0]
+	for _, b := range kept {
+		if b.ReleaseID == rel.ID {
+			batchIDs = append(batchIDs, b.ID)
+		}
+	}
+	for start := 0; start < len(remaining); start += size {
+		end := start + size
+		if end > len(remaining) {
+			end = len(remaining)
+		}
+		b := store.Batch{
+			ID: newID(tx, "batch"), ReleaseID: rel.ID, Index: idx,
+			Phase: "pending", TargetVersion: rel.TargetVersion,
+		}
+		for _, id := range remaining[start:end] {
+			inst := findInstance(tx, id)
+			from := rel.Baseline
+			if inst != nil {
+				from = inst.CurrentVersion
+			}
+			b.Members = append(b.Members, store.MemberState{
+				InstanceID: id, FromVersion: from, ToVersion: rel.TargetVersion,
+				UpdateState: "pending", HealthState: "pending",
+			})
+		}
+		kept = append(kept, b)
+		batchIDs = append(batchIDs, b.ID)
+		idx++
+	}
+	rel.BatchIDs = append([]string(nil), batchIDs...)
+	tx.SetBatches(kept)
+	return nil
+}
+
+func sortBatches(bs []*store.Batch) {
+	sort.Slice(bs, func(i, j int) bool { return bs[i].Index < bs[j].Index })
+}
+
+// rejectOnFailureEvidence blocks "continue"/"shrink" when the active batch
+// already contains a failed update or an unhealthy observation: such a batch
+// can only be rolled back or explicitly ended.
+func rejectOnFailureEvidence(tx *store.Tx, rel *store.Release, msg string) error {
+	for _, b := range releaseBatches(tx, rel.ID) {
+		if b.Phase != "paused" {
+			continue
+		}
+		for _, m := range b.Members {
+			if m.UpdateState == "failed" || m.HealthState == "unhealthy" {
+				return errors.New(msg)
+			}
+		}
+	}
+	return nil
+}
+
 func batchLabel(b *store.Batch) string {
 	return fmt.Sprintf("第 %d 批", b.Index+1)
+}
+
+func healthVerdictText(v string) string {
+	if v == "healthy" {
+		return "健康"
+	}
+	return "不健康"
 }
 
 // updateShouldFail decides the virtual outcome of an update op.

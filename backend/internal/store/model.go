@@ -29,6 +29,13 @@ type MemberState struct {
 	HealthState     string `json:"healthState"` // pending|in_progress|healthy|unhealthy|stale
 	Message         string `json:"message"`
 	LastResolvedKey string `json:"lastResolvedKey"`
+	// LateHealth* records a health answer that arrived after the member's fate
+	// was already decided (review cancel/rollback, or the instance moved on).
+	// The verdict stays queryable as evidence but can never change the
+	// authoritative HealthState or the release's terminal decision.
+	LateHealthResult  string `json:"lateHealthResult,omitempty"` // healthy|unhealthy
+	LateHealthVersion string `json:"lateHealthVersion,omitempty"`
+	LateHealthAt      string `json:"lateHealthAt,omitempty"`
 }
 
 // Batch is stored independently from releases.
@@ -63,9 +70,16 @@ type Release struct {
 	CancelRequested bool        `json:"cancelRequested"`
 	ResumeRequested bool        `json:"resumeRequested"`
 	FinishRequested bool        `json:"finishRequested"`
-	CreatedAt       string      `json:"createdAt"`
-	FinishedAt      string      `json:"finishedAt,omitempty"`
-	Message         string      `json:"message,omitempty"`
+	// PauseRequested freezes expansion and auto-decisions while scheduled
+	// evidence (health results) is still collected. ReviewAction records the
+	// operator's decision so a reopen never replays a finished batch.
+	PauseRequested bool   `json:"pauseRequested,omitempty"`
+	ReviewAction   string `json:"reviewAction,omitempty"` // ""|continue|shrink|rollback
+	ReviewShrinkTo int    `json:"reviewShrinkTo,omitempty"`
+	ReviewAt       string `json:"reviewAt,omitempty"`
+	CreatedAt      string `json:"createdAt"`
+	FinishedAt     string `json:"finishedAt,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 // Op is a virtual asynchronous operation with a scheduled due time. All

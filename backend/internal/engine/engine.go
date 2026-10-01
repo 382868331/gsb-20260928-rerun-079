@@ -135,10 +135,30 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 	// can never be attributed to the next version.
 	movedOn := inst != nil && inst.CurrentVersion != op.ResolveVersion
 	if terminal || m.LastResolvedKey == key || m.UpdateState == "rolled_back" || m.UpdateState == "rollback_in_progress" || b.Phase == "rolling_back" || m.ToVersion != op.ResolveVersion || movedOn {
-		if !terminal {
+		// The verdict is still real evidence: keep it queryable on the member
+		// even though the fate of the release was already decided (review
+		// cancel/rollback) or the instance moved on. It never flips the
+		// authoritative HealthState, the instance health, or the decision.
+		healthy := true
+		if rel := findRelease(tx, op.ReleaseID); rel != nil {
+			healthy = !healthShouldFail(*rel, *b, *m)
+		}
+		verdict := "healthy"
+		if !healthy {
+			verdict = "unhealthy"
+		}
+		if m.LateHealthResult == "" {
+			m.LateHealthResult = verdict
+			m.LateHealthVersion = op.ResolveVersion
+			m.LateHealthAt = nowStr(now)
+			tx.AddEvent(nowStr(now), op.ReleaseID, op.BatchID, op.InstanceID, "warn",
+				"迟到的健康结果（"+op.ResolveVersion+"："+healthVerdictText(verdict)+"）已留档，不改变已确定的审查/终止决定")
+		}
+		if !terminal && m.HealthState != "stale" {
 			m.HealthState = "stale"
-			m.Message = "健康结果迟到：实例已不在该版本，结果作废，不计入后续版本"
-			tx.AddEvent(nowStr(now), op.ReleaseID, op.BatchID, op.InstanceID, "warn", "迟到的健康结果被忽略（期望版本 "+op.ResolveVersion+"），未归入任何后续版本")
+			if m.Message == "" {
+				m.Message = "健康结果迟到：实例归宿已确定，结果仅留档不计入决定"
+			}
 		}
 		return
 	}

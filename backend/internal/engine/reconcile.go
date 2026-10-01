@@ -38,6 +38,11 @@ func (e *Engine) reconcile(tx *store.Tx, now time.Time) (bool, error) {
 			return true, nil
 		}
 		b := batches[activeIdx]
+		// While a review pause is open, pending batches must not start even if
+		// the active batch is already frozen on an earlier index.
+		if b.Phase == "pending" && rel.Status == "paused" && rel.ReviewAction == "" && !rel.CancelRequested {
+			continue
+		}
 		if rel.Status == "pending" {
 			rel.Status = "in_progress"
 		}
@@ -81,10 +86,16 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		return true
 
 	case "updating", "observing":
+		// A manual review pause freezes every automatic decision: no failure
+		// rollback, no cancel rollback, no expansion, while evidence already
+		// scheduled (health answers) keeps arriving and is recorded.
+		if rel.PauseRequested && rel.Status == "paused" && !rel.CancelRequested && rel.ReviewAction == "" {
+			return false
+		}
 		// 1. update failure -> rollback the whole batch.
 		for i := range b.Members {
 			if b.Members[i].UpdateState == "failed" {
-				if rel.Failure.PauseOnFailure && !rel.ResumeRequested && !rel.CancelRequested {
+				if rel.Failure.PauseOnFailure && !rel.ResumeRequested && !rel.CancelRequested && rel.ReviewAction == "" {
 					e.pauseBatch(tx, rel, b, now, "存在更新失败的实例")
 					return true
 				}
@@ -95,7 +106,7 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		// 2. unhealthy observation -> rollback.
 		for i := range b.Members {
 			if b.Members[i].HealthState == "unhealthy" {
-				if rel.Failure.PauseOnFailure && !rel.ResumeRequested && !rel.CancelRequested {
+				if rel.Failure.PauseOnFailure && !rel.ResumeRequested && !rel.CancelRequested && rel.ReviewAction == "" {
 					e.pauseBatch(tx, rel, b, now, "健康观察未通过")
 					return true
 				}
@@ -138,18 +149,38 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		return false
 
 	case "paused":
-		// Drill paused after a failed member: an operator reviews the failed
-		// instances, then either resumes the rollback or ends the drill while
-		// keeping the live version distribution in place.
+		// A batch waits here while a human reviews the evidence. Every choice
+		// is persisted on the release, so a page reopen shows the same frozen
+		// state and pressing a button twice can't change a made decision.
 		switch {
-		case rel.ResumeRequested || rel.CancelRequested:
+		case rel.CancelRequested:
+			rel.ResumeRequested = false
+			e.startBatchRollback(tx, rel, b, now, "审查中取消发布：当前批次回退，之后到达的健康结果仅留档")
+			return true
+		case rel.ResumeRequested || rel.ReviewAction == "rollback":
 			rel.ResumeRequested = false
 			e.startBatchRollback(tx, rel, b, now, "审查完成，继续批次回退")
 			return true
-		case rel.FinishRequested:
+		case rel.FinishRequested || rel.ReviewAction == "finish":
 			b.Phase = "failed"
 			b.FinishedAt = nowStr(now)
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "error", "审查后结束本次演练：保留当前版本分布，不执行回退")
+			return true
+		case rel.ReviewAction == "continue" || rel.ReviewAction == "shrink":
+			rel.PauseRequested = false
+			rel.Status = "in_progress"
+			anyUpdated := false
+			for i := range b.Members {
+				if b.Members[i].UpdateState == "succeeded" {
+					anyUpdated = true
+				}
+			}
+			if anyUpdated {
+				b.Phase = "observing"
+			} else {
+				b.Phase = "updating"
+			}
+			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", batchLabel(b)+" 审查暂停结束，按决定继续推进（不重复已完成更新）")
 			return true
 		}
 		return false

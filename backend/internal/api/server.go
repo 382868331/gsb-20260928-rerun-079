@@ -27,7 +27,12 @@ func NewServer(svc *engine.Service, st *store.Store) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/state", s.handleState)
+	mux.HandleFunc("POST /api/environment/init", s.handleInitEnvironment)
 	mux.HandleFunc("POST /api/releases", s.handleCreateRelease)
+	mux.HandleFunc("POST /api/releases/{id}/pause", s.handlePause)
+	mux.HandleFunc("POST /api/releases/{id}/review/continue", s.handleReviewContinue)
+	mux.HandleFunc("POST /api/releases/{id}/review/shrink", s.handleReviewShrink)
+	mux.HandleFunc("POST /api/releases/{id}/review/rollback", s.handleReviewRollback)
 	mux.HandleFunc("POST /api/releases/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /api/releases/{id}/resume", s.handleResume)
 	mux.HandleFunc("POST /api/releases/{id}/finish", s.handleFinish)
@@ -95,6 +100,15 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.snapshot())
 }
 
+func (s *Server) handleInitEnvironment(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.EnsureEnvironment(time.Now()); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.broadcast()
+	writeJSON(w, s.snapshot())
+}
+
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -136,6 +150,49 @@ func (s *Server) handleCreateRelease(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.CancelRelease(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.PauseForReview(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleReviewContinue(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.ReviewContinue(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleReviewShrink(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BatchSize int `json:"batchSize"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.svc.ReviewShrink(r.PathValue("id"), req.BatchSize, time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleReviewRollback(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.ReviewRollback(r.PathValue("id"), time.Now()); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
