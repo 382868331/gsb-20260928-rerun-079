@@ -71,6 +71,44 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", "发布已取消，未开始的批次不再扩批")
 			return true
 		}
+		// Compatibility + health basis is evaluated and persisted before the
+		// batch takes effect. A blocking constraint (a dependent must update
+		// first) freezes the release; a pause-mode constraint freezes it for
+		// review exactly once, until a human accepts the evidence.
+		pre := &store.Preflight{
+			CheckedAt:   nowStr(now),
+			Findings:    evaluateCompat(tx, rel.ServiceID, rel.TargetVersion),
+			HealthBasis: healthBasis(tx, b),
+		}
+		pre.Compatible = !hasBlockingFinding(pre.Findings) && !hasPausingFinding(pre.Findings)
+		b.Preflight = pre
+		if hasBlockingFinding(pre.Findings) {
+			rel.Status = "paused"
+			rel.PauseRequested = true
+			rel.CompatBlocked = true
+			rel.Message = "兼容约束未满足：依赖者必须先更新，批次暂停推进"
+			for _, f := range pre.Findings {
+				if f.Blocking && !f.Compatible {
+					tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "error", "兼容约束阻止扩批："+f.Detail)
+				}
+			}
+			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 暂停推进：等待依赖者先更新，约束满足后在审查中选择继续")
+			return true
+		}
+		if hasPausingFinding(pre.Findings) && rel.ReviewAction == "" {
+			rel.Status = "paused"
+			rel.PauseRequested = true
+			rel.Message = "兼容审查暂停：依赖者兼容性需人工确认后才能扩批"
+			for _, f := range pre.Findings {
+				if !f.Compatible {
+					tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", "兼容审查："+f.Detail)
+				}
+			}
+			return true
+		}
+		for _, f := range pre.Findings {
+			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", "扩批前兼容检查："+f.Detail)
+		}
 		b.Phase = "updating"
 		b.StartedAt = nowStr(now)
 		for i := range b.Members {
@@ -141,6 +179,28 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			}
 		}
 		if allHealthy {
+			// A healthy batch is not enough: re-check cross-service
+			// compatibility before letting the batch take effect, so this
+			// release never breaks other services on health evidence alone.
+			findings := evaluateCompat(tx, rel.ServiceID, rel.TargetVersion)
+			b.Preflight = &store.Preflight{
+				CheckedAt:   nowStr(now),
+				Compatible:  !hasBlockingFinding(findings),
+				Findings:    findings,
+				HealthBasis: healthBasis(tx, b),
+			}
+			if hasBlockingFinding(findings) {
+				rel.Status = "paused"
+				rel.PauseRequested = true
+				rel.CompatBlocked = true
+				rel.Message = "批次健康但兼容约束未满足：依赖者必须先更新，批次暂不生效"
+				for _, f := range findings {
+					if f.Blocking && !f.Compatible {
+						tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "error", "批次健康但兼容约束未满足："+f.Detail)
+					}
+				}
+				return true
+			}
 			b.Phase = "succeeded"
 			b.FinishedAt = nowStr(now)
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", batchLabel(b)+" 全部通过健康观察")

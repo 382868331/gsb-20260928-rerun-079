@@ -37,6 +37,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/releases/{id}/resume", s.handleResume)
 	mux.HandleFunc("POST /api/releases/{id}/finish", s.handleFinish)
 	mux.HandleFunc("POST /api/versions", s.handleCreateVersion)
+	mux.HandleFunc("POST /api/services/{id}/instances", s.handleAddInstance)
+	mux.HandleFunc("POST /api/rules", s.handleAddRule)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
 }
@@ -45,14 +47,20 @@ func (s *Server) snapshot() store.Snapshot {
 	var snap store.Snapshot
 	s.st.View(func(tx *store.Tx) {
 		snap = store.Snapshot{
-			Versions:  append([]store.Version(nil), tx.Versions()...),
-			Instances: append([]store.Instance(nil), tx.Instances()...),
-			Releases:  append([]store.Release(nil), tx.Releases()...),
-			Batches:   append([]store.Batch(nil), tx.Batches()...),
-			Ops:       append([]store.Op(nil), tx.Ops()...),
-			Events:    append([]store.Event(nil), tx.Events()...),
+			// Non-nil slices: an empty drill must serialize as [], never
+			// null, so a first open on empty data renders the empty state
+			// instead of crashing the page on a null lookup.
+			Versions:  append([]store.Version{}, tx.Versions()...),
+			Services:  append([]store.Service{}, tx.Services()...),
+			Rules:     append([]store.CompatRule{}, tx.Rules()...),
+			Instances: append([]store.Instance{}, tx.Instances()...),
+			Releases:  append([]store.Release{}, tx.Releases()...),
+			Batches:   append([]store.Batch{}, tx.Batches()...),
+			Ops:       append([]store.Op{}, tx.Ops()...),
+			Events:    append([]store.Event{}, tx.Events()...),
 		}
 	})
+	snap.Dependencies = append([]store.DependencyStatus{}, s.svc.DependencyStatuses()...)
 	return snap
 }
 
@@ -234,6 +242,31 @@ func (s *Server) handleCreateVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcast()
 	writeJSON(w, v)
+}
+
+func (s *Server) handleAddInstance(w http.ResponseWriter, r *http.Request) {
+	inst, err := s.svc.AddInstance(r.PathValue("id"), time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	writeJSON(w, inst)
+}
+
+func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
+	var rule store.CompatRule
+	if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, err := s.svc.AddRule(rule, time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	writeJSON(w, out)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

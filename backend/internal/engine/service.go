@@ -37,21 +37,42 @@ func (s *Service) Seed(now time.Time) error {
 		v1 := store.Version{ID: "v1.0.0", Name: "订单服务 1.0.0（基线）", ArtifactRef: "local://virtual/order-service:1.0.0", CreatedAt: nowStr(now)}
 		v2 := store.Version{ID: "v2.0.0", Name: "订单服务 2.0.0（演练目标）", ArtifactRef: "local://virtual/order-service:2.0.0", CreatedAt: nowStr(now)}
 		tx.SetVersions([]store.Version{v1, v2})
+		tx.SetServices([]store.Service{
+			{ID: "svc-order", Name: "订单服务"},
+			{ID: "svc-pay", Name: "支付服务"},
+			{ID: "svc-inventory", Name: "库存服务"},
+		})
+		tx.SetRules([]store.CompatRule{
+			{ID: "rule-pay-order-v1", ProviderID: "svc-pay", DependentID: "svc-order",
+				DependentVersion: "v1.0.0", MinProviderVersion: "v1.0.0", MaxProviderVersion: "v1.9.9",
+				Mode: "update_first", Note: "订单服务 v1.0.0 仅兼容支付服务 v1.x"},
+			{ID: "rule-pay-order-v2", ProviderID: "svc-pay", DependentID: "svc-order",
+				DependentVersion: "v2.0.0", MinProviderVersion: "v1.0.0", MaxProviderVersion: "v2.9.9",
+				Mode: "update_first", Note: "订单服务 v2.0.0 起兼容支付服务 v2.x"},
+			{ID: "rule-inv-order", ProviderID: "svc-inventory", DependentID: "svc-order",
+				MinProviderVersion: "v1.0.0", MaxProviderVersion: "v1.9.9",
+				Mode: "pause", Note: "库存服务升级需人工确认订单服务兼容"},
+			{ID: "rule-order-pay", ProviderID: "svc-order", DependentID: "svc-pay",
+				DependentVersion: "v1.0.0", MinProviderVersion: "v1.0.0", MaxProviderVersion: "v2.9.9",
+				Mode: "stay_old", Note: "支付服务保持旧版仍兼容订单服务 v2"},
+		})
 		var insts []store.Instance
 		for i := 1; i <= 6; i++ {
 			insts = append(insts, store.Instance{
 				ID: fmt.Sprintf("inst-%d", i), Name: fmt.Sprintf("虚拟实例-%d", i),
+				ServiceID:      "svc-order",
 				CurrentVersion: v1.ID, DesiredVersion: v1.ID, Health: "healthy",
 				UpdatedAt: nowStr(now),
 			})
 		}
 		tx.SetInstances(insts)
-		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：6 个本地虚拟实例，基线版本 v1.0.0")
+		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：3 个虚拟服务、6 个本地虚拟实例、4 条兼容约束，基线版本 v1.0.0")
 		return nil
 	})
 }
 
 type CreateReleaseRequest struct {
+	ServiceID     string            `json:"serviceId"`
 	TargetVersion string            `json:"targetVersion"`
 	BatchSize     int               `json:"batchSize"`
 	Strategy      string            `json:"strategy"`
@@ -76,24 +97,36 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		if target == nil {
 			return errors.New("目标版本不存在")
 		}
+		serviceID := req.ServiceID
+		if serviceID == "" && len(tx.Services()) > 0 {
+			serviceID = tx.Services()[0].ID
+		}
 		for i := range tx.Releases() {
 			r := tx.Releases()[i]
-			if !isReleaseTerminal(r.Status) {
-				return errors.New("已有进行中的发布，演练平台同一时间只运行一个发布")
+			if !isReleaseTerminal(r.Status) && r.ServiceID == serviceID {
+				return errors.New("该服务已有进行中的发布，同一服务同一时间只运行一个发布")
 			}
 		}
-		insts := tx.Instances()
+		var insts []store.Instance
+		if serviceID == "" {
+			insts = tx.Instances()
+		} else {
+			if findService(tx, serviceID) == nil {
+				return errors.New("目标服务不存在")
+			}
+			insts = serviceInstances(tx, serviceID)
+		}
 		if len(insts) == 0 {
-			return errors.New("没有虚拟实例")
+			return errors.New("该服务没有虚拟实例")
 		}
 		baseline := insts[0].DesiredVersion
 		for _, inst := range insts {
 			if inst.CurrentVersion != insts[0].CurrentVersion {
-				return errors.New("实例当前版本不一致，请先统一基线后再发布")
+				return errors.New("服务内实例当前版本不一致，请先统一基线后再发布")
 			}
 		}
 		rel := store.Release{
-			ID: newID(tx, "rel"), TargetVersion: target.ID, Baseline: baseline,
+			ID: newID(tx, "rel"), ServiceID: serviceID, TargetVersion: target.ID, Baseline: baseline,
 			Strategy: req.Strategy, BatchSize: req.BatchSize, Status: "pending",
 			Failure: req.Failure, CreatedAt: nowStr(now),
 		}
@@ -123,8 +156,8 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		tx.SetReleases(append(tx.Releases(), rel))
 		tx.SetBatches(append(tx.Batches(), batches...))
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "info",
-			fmt.Sprintf("创建发布 %s：策略 %s，%d 个批次，每批 %d 台，目标版本 %s",
-				rel.ID, rel.Strategy, len(batches), rel.BatchSize, target.ID))
+			fmt.Sprintf("创建发布 %s：服务 %s，策略 %s，%d 个批次，每批 %d 台，目标版本 %s",
+				rel.ID, serviceName(tx, serviceID), rel.Strategy, len(batches), rel.BatchSize, target.ID))
 		rc := rel
 		created = &rc
 		return nil
@@ -147,12 +180,56 @@ func (s *Service) CancelRelease(releaseID string, now time.Time) error {
 		rel.CancelRequested = true
 		rel.ReviewAction = "cancel"
 		rel.ReviewAt = nowStr(now)
+		rel.RollbackNote = rollbackAssessment(tx, rel)
 		if rel.Status != "paused" {
 			rel.Status = "cancelling"
 		}
-		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "收到取消请求：停止继续扩批；暂停/取消后到达的健康结果只作为证据留档，不再改变终止决定")
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "收到取消请求：停止继续扩批；暂停/取消后到达的健康结果只作为证据留档，不再改变终止决定。 "+rel.RollbackNote)
 		return nil
 	})
+}
+
+// rollbackAssessment explains, at the moment the operator chooses to roll
+// back, whether dependent services stay compatible and which already
+// completed batches can no longer be undone.
+func rollbackAssessment(tx *store.Tx, rel *store.Release) string {
+	var completed []string
+	for _, b := range releaseBatches(tx, rel.ID) {
+		if b.Phase == "succeeded" {
+			completed = append(completed, batchLabel(b))
+		}
+	}
+	note := ""
+	if len(completed) > 0 {
+		note = fmt.Sprintf("已完成批次（%s）已生效，不能直接撤销，仅当前进行中批次会回退；",
+			joinComma(completed))
+	} else {
+		note = "尚无已完成批次，当前批次可整体回退；"
+	}
+	findings := evaluateCompat(tx, rel.ServiceID, rel.Baseline)
+	bad := 0
+	for _, f := range findings {
+		if !f.Compatible {
+			bad++
+		}
+	}
+	if bad == 0 {
+		note += "回退到基线 " + rel.Baseline + " 后，所有依赖者保持兼容。"
+	} else {
+		note += fmt.Sprintf("注意：回退到基线 %s 后仍有 %d 条依赖约束不满足，请检查依赖者版本。", rel.Baseline, bad)
+	}
+	return note
+}
+
+func joinComma(ss []string) string {
+	out := ""
+	for i, s := range ss {
+		if i > 0 {
+			out += "、"
+		}
+		out += s
+	}
+	return out
 }
 
 // EnsureEnvironment creates the default drill environment on demand. The
@@ -215,9 +292,17 @@ func (s *Service) ReviewContinue(releaseID string, now time.Time) error {
 		if err := rejectOnFailureEvidence(tx, rel, "存在失败/不健康实例，只能选择回退或结束演练"); err != nil {
 			return err
 		}
+		if rel.CompatBlocked {
+			findings := evaluateCompat(tx, rel.ServiceID, rel.TargetVersion)
+			if hasBlockingFinding(findings) {
+				return errors.New("依赖者尚未先更新，兼容约束仍不满足，无法继续")
+			}
+			rel.CompatBlocked = false
+		}
 		rel.PauseRequested = false
 		rel.ReviewAction = "continue"
 		rel.ReviewAt = nowStr(now)
+		rel.Status = "in_progress"
 		rel.Message = "审查通过，按原批次继续发布"
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", "人工审查后选择继续：按原批次推进")
 		return nil
@@ -251,6 +336,13 @@ func (s *Service) ReviewShrink(releaseID string, size int, now time.Time) error 
 		if err := rejectOnFailureEvidence(tx, rel, "存在失败/不健康实例，无法缩小批次继续，只能回退或结束演练"); err != nil {
 			return err
 		}
+		if rel.CompatBlocked {
+			findings := evaluateCompat(tx, rel.ServiceID, rel.TargetVersion)
+			if hasBlockingFinding(findings) {
+				return errors.New("依赖者尚未先更新，兼容约束仍不满足，无法继续")
+			}
+			rel.CompatBlocked = false
+		}
 		if err := rebuildPendingBatches(tx, rel, size, now); err != nil {
 			return err
 		}
@@ -258,6 +350,7 @@ func (s *Service) ReviewShrink(releaseID string, size int, now time.Time) error 
 		rel.ReviewAction = "shrink"
 		rel.ReviewShrinkTo = size
 		rel.ReviewAt = nowStr(now)
+		rel.Status = "in_progress"
 		rel.BatchSize = size
 		rel.Message = fmt.Sprintf("审查后缩小批次：后续每批 %d 台", size)
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", fmt.Sprintf("人工审查后选择缩小批次：后续每批 %d 台，已完成批次不重复执行", size))
@@ -286,8 +379,9 @@ func (s *Service) ReviewRollback(releaseID string, now time.Time) error {
 		rel.ReviewAction = "rollback"
 		rel.ReviewAt = nowStr(now)
 		rel.ResumeRequested = true
+		rel.RollbackNote = rollbackAssessment(tx, rel)
 		rel.Message = "审查后决定回退：当前批次返回原版本，后续批次不再扩批"
-		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "人工审查后选择回退；之后到达的健康结果仅留档，不改变决定")
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "人工审查后选择回退；之后到达的健康结果仅留档，不改变决定。 "+rel.RollbackNote)
 		return nil
 	})
 }
@@ -316,8 +410,9 @@ func (s *Service) ResumeRollback(releaseID string, now time.Time) error {
 		rel.ResumeRequested = true
 		rel.ReviewAction = "rollback"
 		rel.ReviewAt = nowStr(now)
+		rel.RollbackNote = rollbackAssessment(tx, rel)
 		rel.Message = "审查后决定继续回退"
-		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", "审查完成，选择继续回退")
+		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", "审查完成，选择继续回退。 "+rel.RollbackNote)
 		return nil
 	})
 }
@@ -365,4 +460,105 @@ func (s *Service) CreateVersion(id, name string, now time.Time) (*store.Version,
 		return nil
 	})
 	return out, err
+}
+
+// AddInstance creates a new virtual instance for a service on the service's
+// current baseline (the version its existing instances converge to, else the
+// oldest known version). It never touches any real deploy target.
+func (s *Service) AddInstance(serviceID string, now time.Time) (*store.Instance, error) {
+	var out *store.Instance
+	err := s.st.Mutate(func(tx *store.Tx) error {
+		svc := findService(tx, serviceID)
+		if svc == nil {
+			return errors.New("目标服务不存在")
+		}
+		baseline := ""
+		for _, inst := range serviceInstances(tx, serviceID) {
+			if baseline == "" || compareVersions(inst.DesiredVersion, baseline) < 0 {
+				baseline = inst.DesiredVersion
+			}
+		}
+		if baseline == "" && len(tx.Versions()) > 0 {
+			baseline = tx.Versions()[0].ID
+		}
+		if baseline == "" {
+			return errors.New("尚无可用版本，请先创建版本")
+		}
+		id := ""
+		for {
+			candidate := newID(tx, "inst")
+			if findInstance(tx, candidate) == nil {
+				id = candidate
+				break
+			}
+		}
+		inst := store.Instance{
+			ID: id, Name: svc.Name + "-" + id, ServiceID: serviceID,
+			CurrentVersion: baseline, DesiredVersion: baseline,
+			Health: "healthy", UpdatedAt: nowStr(now),
+		}
+		tx.SetInstances(append(tx.Instances(), inst))
+		tx.AddEvent(nowStr(now), "", "", inst.ID, "info", "新增虚拟实例 "+inst.ID+"（"+svc.Name+"，基线 "+baseline+"）")
+		ic := inst
+		out = &ic
+		return nil
+	})
+	return out, err
+}
+
+// AddRule registers a compatibility constraint between two virtual services.
+func (s *Service) AddRule(rule store.CompatRule, now time.Time) (*store.CompatRule, error) {
+	if rule.ProviderID == "" || rule.DependentID == "" {
+		return nil, errors.New("约束必须指定服务与依赖者")
+	}
+	if rule.ProviderID == rule.DependentID {
+		return nil, errors.New("服务不能依赖自身")
+	}
+	switch rule.Mode {
+	case "update_first", "stay_old", "pause":
+	default:
+		return nil, errors.New("未知的约束处理方式：" + rule.Mode)
+	}
+	var out *store.CompatRule
+	err := s.st.Mutate(func(tx *store.Tx) error {
+		if findService(tx, rule.ProviderID) == nil || findService(tx, rule.DependentID) == nil {
+			return errors.New("约束涉及的服务不存在")
+		}
+		rule.ID = newID(tx, "rule")
+		tx.SetRules(append(tx.Rules(), rule))
+		tx.AddEvent(nowStr(now), "", "", "", "info",
+			fmt.Sprintf("新增兼容约束 %s：%s 更新影响依赖者 %s（%s）",
+				rule.ID, serviceName(tx, rule.ProviderID), serviceName(tx, rule.DependentID), rule.Mode))
+		rc := rule
+		out = &rc
+		return nil
+	})
+	return out, err
+}
+
+// DependencyStatuses computes, for every in-flight release, the compatibility
+// constraints that are not yet satisfied (unfinished dependencies).
+func (s *Service) DependencyStatuses() []store.DependencyStatus {
+	var out []store.DependencyStatus
+	s.st.View(func(tx *store.Tx) {
+		for _, rel := range tx.Releases() {
+			if isReleaseTerminal(rel.Status) {
+				continue
+			}
+			st := store.DependencyStatus{ReleaseID: rel.ID, ServiceID: rel.ServiceID}
+			for _, f := range evaluateCompat(tx, rel.ServiceID, rel.TargetVersion) {
+				if f.Compatible {
+					continue
+				}
+				st.Pending = append(st.Pending, f.Detail)
+				if f.Blocking {
+					st.Blocked = true
+				}
+			}
+			if len(st.Pending) > 0 {
+				out = append(out, st)
+			}
+		}
+	})
+	return out
 }

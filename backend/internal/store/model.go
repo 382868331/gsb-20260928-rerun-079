@@ -9,11 +9,60 @@ type Version struct {
 	CreatedAt   string `json:"createdAt"`
 }
 
+// Service is a virtual service in the drill. Instances belong to exactly one
+// service; releases always target a single service.
+type Service struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// CompatRule describes which provider versions a dependent service can run
+// against. When the provider service is released to a target outside
+// [MinProviderVersion, MaxProviderVersion] while the dependent sits on
+// DependentVersion (empty = any), the rule is violated and Mode decides the
+// consequence:
+//   - update_first: the dependent must be updated first; the provider batch
+//     is blocked until then.
+//   - stay_old: the dependent may stay on its old version; informational.
+//   - pause: the provider release pauses for manual review before expanding.
+type CompatRule struct {
+	ID                 string `json:"id"`
+	ProviderID         string `json:"providerId"`
+	DependentID        string `json:"dependentId"`
+	DependentVersion   string `json:"dependentVersion,omitempty"`
+	MinProviderVersion string `json:"minProviderVersion,omitempty"`
+	MaxProviderVersion string `json:"maxProviderVersion,omitempty"`
+	Mode               string `json:"mode"` // update_first|stay_old|pause
+	Note               string `json:"note,omitempty"`
+}
+
+// CompatFinding is one evaluated rule outcome, persisted on the batch that
+// was gated by it so the basis of every decision survives a reopen.
+type CompatFinding struct {
+	RuleID      string `json:"ruleId"`
+	ProviderID  string `json:"providerId"`
+	DependentID string `json:"dependentId"`
+	Mode        string `json:"mode"`
+	Compatible  bool   `json:"compatible"`
+	Blocking    bool   `json:"blocking"`
+	Detail      string `json:"detail"`
+}
+
+// Preflight is the compatibility + health basis evaluated right before a
+// batch takes effect (and re-evaluated before it is allowed to succeed).
+type Preflight struct {
+	CheckedAt   string          `json:"checkedAt"`
+	Compatible  bool            `json:"compatible"`
+	Findings    []CompatFinding `json:"findings"`
+	HealthBasis []string        `json:"healthBasis"`
+}
+
 // Instance is a local virtual instance. DesiredVersion is what the fleet
 // converges back to when no release is active (the known-good baseline).
 type Instance struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
+	ServiceID      string `json:"serviceId"`
 	CurrentVersion string `json:"currentVersion"`
 	DesiredVersion string `json:"desiredVersion"`
 	Health         string `json:"health"` // healthy | unhealthy | unknown
@@ -46,6 +95,7 @@ type Batch struct {
 	Phase         string        `json:"phase"` // pending|updating|observing|succeeded|failed|cancelling|rolling_back|rolled_back|cancelled
 	TargetVersion string        `json:"targetVersion"`
 	Members       []MemberState `json:"members"`
+	Preflight     *Preflight    `json:"preflight,omitempty"`
 	StartedAt     string        `json:"startedAt,omitempty"`
 	FinishedAt    string        `json:"finishedAt,omitempty"`
 }
@@ -60,6 +110,7 @@ type FailureSpec struct {
 
 type Release struct {
 	ID              string      `json:"id"`
+	ServiceID       string      `json:"serviceId"`
 	TargetVersion   string      `json:"targetVersion"`
 	Baseline        string      `json:"baselineVersion"`
 	Strategy        string      `json:"strategy"` // rolling
@@ -77,9 +128,16 @@ type Release struct {
 	ReviewAction   string `json:"reviewAction,omitempty"` // ""|continue|shrink|rollback
 	ReviewShrinkTo int    `json:"reviewShrinkTo,omitempty"`
 	ReviewAt       string `json:"reviewAt,omitempty"`
-	CreatedAt      string `json:"createdAt"`
-	FinishedAt     string `json:"finishedAt,omitempty"`
-	Message        string `json:"message,omitempty"`
+	// CompatBlocked marks a release frozen by an update_first compatibility
+	// rule: a dependent service must be updated before any batch may expand.
+	CompatBlocked bool `json:"compatBlocked,omitempty"`
+	// RollbackNote records the assessment shown when the operator chose to
+	// roll back: whether dependents stay compatible and which completed
+	// batches can no longer be undone.
+	RollbackNote string `json:"rollbackNote,omitempty"`
+	CreatedAt    string `json:"createdAt"`
+	FinishedAt   string `json:"finishedAt,omitempty"`
+	Message      string `json:"message,omitempty"`
 }
 
 // Op is a virtual asynchronous operation with a scheduled due time. All
@@ -111,10 +169,24 @@ type Event struct {
 }
 
 type Snapshot struct {
-	Versions  []Version  `json:"versions"`
-	Instances []Instance `json:"instances"`
-	Releases  []Release  `json:"releases"`
-	Batches   []Batch    `json:"batches"`
-	Ops       []Op       `json:"ops"`
-	Events    []Event    `json:"events"`
+	Versions  []Version    `json:"versions"`
+	Services  []Service    `json:"services"`
+	Rules     []CompatRule `json:"rules"`
+	Instances []Instance   `json:"instances"`
+	Releases  []Release    `json:"releases"`
+	Batches   []Batch      `json:"batches"`
+	Ops       []Op         `json:"ops"`
+	Events    []Event      `json:"events"`
+	// Dependencies lists, per in-flight release, the compatibility
+	// constraints that are not yet satisfied (unfinished dependencies).
+	Dependencies []DependencyStatus `json:"dependencies"`
+}
+
+// DependencyStatus summarizes the unmet compatibility constraints of one
+// release at snapshot time.
+type DependencyStatus struct {
+	ReleaseID string   `json:"releaseId"`
+	ServiceID string   `json:"serviceId"`
+	Blocked   bool     `json:"blocked"`
+	Pending   []string `json:"pending"`
 }

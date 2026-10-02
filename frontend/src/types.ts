@@ -8,10 +8,51 @@ export interface Version {
 export interface Instance {
   id: string;
   name: string;
+  serviceId: string;
   currentVersion: string;
   desiredVersion: string;
   health: "healthy" | "unhealthy" | "unknown";
   updatedAt: string;
+}
+
+export interface Service {
+  id: string;
+  name: string;
+}
+
+export interface CompatRule {
+  id: string;
+  providerId: string;
+  dependentId: string;
+  dependentVersion?: string;
+  minProviderVersion?: string;
+  maxProviderVersion?: string;
+  mode: "update_first" | "stay_old" | "pause";
+  note?: string;
+}
+
+export interface CompatFinding {
+  ruleId: string;
+  providerId: string;
+  dependentId: string;
+  mode: string;
+  compatible: boolean;
+  blocking: boolean;
+  detail: string;
+}
+
+export interface Preflight {
+  checkedAt: string;
+  compatible: boolean;
+  findings: CompatFinding[];
+  healthBasis: string[];
+}
+
+export interface DependencyStatus {
+  releaseId: string;
+  serviceId: string;
+  blocked: boolean;
+  pending: string[];
 }
 
 export interface MemberState {
@@ -34,6 +75,7 @@ export interface Batch {
   phase: "pending" | "updating" | "observing" | "paused" | "succeeded" | "failed" | "cancelling" | "rolling_back" | "rolled_back" | "cancelled";
   targetVersion: string;
   members: MemberState[];
+  preflight?: Preflight;
   startedAt?: string;
   finishedAt?: string;
 }
@@ -47,6 +89,7 @@ export interface FailureSpec {
 
 export interface Release {
   id: string;
+  serviceId: string;
   targetVersion: string;
   baseline: string;
   strategy: string;
@@ -61,6 +104,8 @@ export interface Release {
   reviewAction?: "" | "continue" | "shrink" | "rollback" | "finish" | "cancel";
   reviewShrinkTo?: number;
   reviewAt?: string;
+  compatBlocked?: boolean;
+  rollbackNote?: string;
   createdAt: string;
   finishedAt?: string;
   message?: string;
@@ -91,9 +136,12 @@ export interface Event {
 
 export interface Snapshot {
   versions: Version[];
+  services: Service[];
+  rules: CompatRule[];
   instances: Instance[];
   releases: Release[];
   batches: Batch[];
   ops: Op[];
   events: Event[];
+  dependencies: DependencyStatus[];
 }

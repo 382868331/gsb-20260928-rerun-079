@@ -1,4 +1,21 @@
-import type { FailureSpec, Snapshot } from "./types";
+import type { CompatRule, FailureSpec, Instance, Snapshot } from "./types";
+
+// normalizeSnapshot defends the render path against null collections: an
+// empty drill must render its empty state, never crash on a null lookup.
+export function normalizeSnapshot(s: Snapshot): Snapshot {
+  return {
+    ...s,
+    versions: s.versions ?? [],
+    services: s.services ?? [],
+    rules: s.rules ?? [],
+    instances: s.instances ?? [],
+    releases: s.releases ?? [],
+    batches: s.batches ?? [],
+    ops: s.ops ?? [],
+    events: s.events ?? [],
+    dependencies: s.dependencies ?? [],
+  };
+}
 
 export async function fetchSnapshot(signal?: AbortSignal): Promise<Snapshot> {
   const res = await fetch("/api/state", { signal });
@@ -7,6 +24,7 @@ export async function fetchSnapshot(signal?: AbortSignal): Promise<Snapshot> {
 }
 
 export async function createRelease(req: {
+  serviceId?: string;
   targetVersion: string;
   batchSize: number;
   strategy: string;
@@ -52,6 +70,28 @@ export async function initEnvironment(): Promise<Snapshot> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || "初始化演练环境失败");
+  }
+  return res.json();
+}
+
+export async function addInstance(serviceId: string): Promise<Instance> {
+  const res = await fetch("/api/services/" + serviceId + "/instances", { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "新增虚拟实例失败");
+  }
+  return res.json();
+}
+
+export async function addRule(rule: Omit<CompatRule, "id">): Promise<CompatRule> {
+  const res = await fetch("/api/rules", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(rule),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "新增兼容约束失败");
   }
   return res.json();
 }
@@ -102,7 +142,7 @@ export function subscribe(onState: (s: Snapshot) => void): () => void {
 
   const poll = () => {
     fetchSnapshot()
-      .then(onState)
+      .then((s) => onState(normalizeSnapshot(s)))
       .catch(() => {});
   };
 
@@ -111,7 +151,7 @@ export function subscribe(onState: (s: Snapshot) => void): () => void {
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
-        onState(JSON.parse(ev.data));
+        onState(normalizeSnapshot(JSON.parse(ev.data)));
       } catch {
         es?.close();
         if (!stopped) pollTimer = window.setInterval(poll, 1000);

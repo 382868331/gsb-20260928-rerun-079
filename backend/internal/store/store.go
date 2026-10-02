@@ -14,6 +14,8 @@ type Store struct {
 	mu        sync.Mutex
 	dir       string
 	versions  []Version
+	services  []Service
+	rules     []CompatRule
 	instances []Instance
 	releases  []Release
 	batches   []Batch
@@ -35,6 +37,12 @@ func Open(dir string) (*Store, error) {
 		return nil
 	}
 	if err := must("versions.json", &s.versions); err != nil {
+		return nil, err
+	}
+	if err := must("services.json", &s.services); err != nil {
+		return nil, err
+	}
+	if err := must("rules.json", &s.rules); err != nil {
 		return nil, err
 	}
 	if err := must("instances.json", &s.instances); err != nil {
@@ -93,6 +101,8 @@ func (s *Store) View(fn func(tx *Tx)) {
 type Tx struct{ s *Store }
 
 func (tx *Tx) Versions() []Version   { return tx.s.versions }
+func (tx *Tx) Services() []Service   { return tx.s.services }
+func (tx *Tx) Rules() []CompatRule   { return tx.s.rules }
 func (tx *Tx) Instances() []Instance { return tx.s.instances }
 func (tx *Tx) Releases() []Release   { return tx.s.releases }
 func (tx *Tx) Batches() []Batch      { return tx.s.batches }
@@ -100,6 +110,8 @@ func (tx *Tx) Ops() []Op             { return tx.s.ops }
 func (tx *Tx) Events() []Event       { return tx.s.events }
 
 func (tx *Tx) SetVersions(v []Version)   { tx.s.versions = v }
+func (tx *Tx) SetServices(v []Service)   { tx.s.services = v }
+func (tx *Tx) SetRules(v []CompatRule)   { tx.s.rules = v }
 func (tx *Tx) SetInstances(v []Instance) { tx.s.instances = v }
 func (tx *Tx) SetReleases(v []Release)   { tx.s.releases = v }
 func (tx *Tx) SetBatches(v []Batch)      { tx.s.batches = v }
@@ -119,6 +131,8 @@ func (s *Store) flush() error {
 		val  any
 	}{
 		{"versions.json", s.versions},
+		{"services.json", s.services},
+		{"rules.json", s.rules},
 		{"instances.json", s.instances},
 		{"releases.json", s.releases},
 		{"batches.json", s.batches},

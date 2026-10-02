@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -64,6 +66,188 @@ func findInstance(tx *store.Tx, id string) *store.Instance {
 		}
 	}
 	return nil
+}
+
+func findService(tx *store.Tx, id string) *store.Service {
+	for i := range tx.Services() {
+		if tx.Services()[i].ID == id {
+			return &tx.Services()[i]
+		}
+	}
+	return nil
+}
+
+func serviceName(tx *store.Tx, id string) string {
+	if s := findService(tx, id); s != nil {
+		return s.Name
+	}
+	return id
+}
+
+// serviceInstances lists instances of one service in stable order.
+func serviceInstances(tx *store.Tx, serviceID string) []store.Instance {
+	var out []store.Instance
+	for _, inst := range tx.Instances() {
+		if inst.ServiceID == serviceID {
+			out = append(out, inst)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// compareVersions orders semver-ish ids (v1.2.3); falls back to string order.
+func compareVersions(a, b string) int {
+	pa := strings.Split(strings.TrimPrefix(a, "v"), ".")
+	pb := strings.Split(strings.TrimPrefix(b, "v"), ".")
+	for i := 0; i < len(pa) && i < len(pb); i++ {
+		na, ea := strconv.Atoi(pa[i])
+		nb, eb := strconv.Atoi(pb[i])
+		if ea != nil || eb != nil {
+			if c := strings.Compare(a, b); c != 0 {
+				return c
+			}
+			return 0
+		}
+		if na != nb {
+			if na < nb {
+				return -1
+			}
+			return 1
+		}
+	}
+	switch {
+	case len(pa) < len(pb):
+		return -1
+	case len(pa) > len(pb):
+		return 1
+	}
+	return 0
+}
+
+// evaluateCompat checks every rule whose provider is serviceID against a
+// proposed target version. Findings are deterministic (sorted by rule id) so
+// the persisted preflight basis is stable.
+func evaluateCompat(tx *store.Tx, serviceID, targetVersion string) []store.CompatFinding {
+	var rules []store.CompatRule
+	for _, r := range tx.Rules() {
+		if r.ProviderID == serviceID {
+			rules = append(rules, r)
+		}
+	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].ID < rules[j].ID })
+	var out []store.CompatFinding
+	for _, r := range rules {
+		f := store.CompatFinding{
+			RuleID: r.ID, ProviderID: r.ProviderID, DependentID: r.DependentID, Mode: r.Mode,
+		}
+		depInsts := serviceInstances(tx, r.DependentID)
+		if len(depInsts) == 0 {
+			f.Compatible = true
+			f.Detail = fmt.Sprintf("依赖者 %s 暂无实例，约束暂不评估", serviceName(tx, r.DependentID))
+			out = append(out, f)
+			continue
+		}
+		dv := depInsts[0].CurrentVersion
+		uniform := true
+		for _, inst := range depInsts[1:] {
+			if inst.CurrentVersion != dv {
+				uniform = false
+			}
+		}
+		if !uniform {
+			f.Compatible = true
+			f.Detail = fmt.Sprintf("依赖者 %s 实例版本不一致，按迁移中处理，仅提示", serviceName(tx, r.DependentID))
+			out = append(out, f)
+			continue
+		}
+		if r.DependentVersion != "" && r.DependentVersion != dv {
+			f.Compatible = true
+			f.Detail = fmt.Sprintf("依赖者 %s 已运行 %s，约束（针对 %s）不再适用",
+				serviceName(tx, r.DependentID), dv, r.DependentVersion)
+			out = append(out, f)
+			continue
+		}
+		inRange := true
+		if r.MinProviderVersion != "" && compareVersions(targetVersion, r.MinProviderVersion) < 0 {
+			inRange = false
+		}
+		if r.MaxProviderVersion != "" && compareVersions(targetVersion, r.MaxProviderVersion) > 0 {
+			inRange = false
+		}
+		dep := serviceName(tx, r.DependentID)
+		if inRange {
+			f.Compatible = true
+			f.Detail = fmt.Sprintf("依赖者 %s（%s）兼容目标版本 %s", dep, dv, targetVersion)
+			if r.Mode == "stay_old" {
+				f.Detail = fmt.Sprintf("依赖者 %s 保持旧版 %s 仍兼容目标版本 %s", dep, dv, targetVersion)
+			}
+			out = append(out, f)
+			continue
+		}
+		f.Compatible = false
+		switch r.Mode {
+		case "update_first":
+			f.Blocking = true
+			f.Detail = fmt.Sprintf("依赖者 %s 仍为 %s，仅兼容 %s %s~%s：必须先更新依赖者，才能推进到 %s",
+				dep, dv, serviceName(tx, r.ProviderID), r.MinProviderVersion, r.MaxProviderVersion, targetVersion)
+		case "pause":
+			f.Detail = fmt.Sprintf("依赖者 %s（%s）尚未验证与 %s 的兼容性，需人工审查后推进",
+				dep, dv, targetVersion)
+		default: // stay_old
+			f.Compatible = true
+			f.Detail = fmt.Sprintf("依赖者 %s 保持旧版 %s，不随本次发布推进", dep, dv)
+		}
+		if r.Note != "" {
+			f.Detail += "（" + r.Note + "）"
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+func hasBlockingFinding(findings []store.CompatFinding) bool {
+	for _, f := range findings {
+		if f.Blocking && !f.Compatible {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPausingFinding(findings []store.CompatFinding) bool {
+	for _, f := range findings {
+		if !f.Compatible && f.Mode == "pause" {
+			return true
+		}
+	}
+	return false
+}
+
+// healthBasis describes the current health/version evidence of the batch
+// members, recorded before the batch takes effect.
+func healthBasis(tx *store.Tx, b *store.Batch) []string {
+	var out []string
+	for _, m := range b.Members {
+		inst := findInstance(tx, m.InstanceID)
+		if inst == nil {
+			out = append(out, fmt.Sprintf("%s：实例记录缺失", m.InstanceID))
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s 当前 %s，健康状态 %s", inst.ID, inst.CurrentVersion, healthText(inst.Health)))
+	}
+	return out
+}
+
+func healthText(h string) string {
+	switch h {
+	case "healthy":
+		return "健康"
+	case "unhealthy":
+		return "不健康"
+	default:
+		return "未知"
+	}
 }
 
 func releaseBatches(tx *store.Tx, releaseID string) []*store.Batch {

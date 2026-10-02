@@ -24,9 +24,6 @@ func main() {
 		log.Fatalf("open store: %v", err)
 	}
 	svc := engine.NewService(st, engine.DefaultConfig())
-	if err := svc.Seed(time.Now()); err != nil {
-		log.Fatalf("seed: %v", err)
-	}
 	srv := api.NewServer(svc, st)
 
 	go srv.Run(500 * time.Millisecond)
@@ -35,7 +32,7 @@ func main() {
 	mux.Handle("/api/", srv.Routes())
 	mux.Handle("/", http.FileServer(http.Dir(*staticDir)))
 
-	log.Printf("软件发布演练平台监听 %s（数据目录 %s，全部为本地虚拟实例）", *addr, *dataDir)
+	log.Printf("软件发布演练平台监听 %s（数据目录 %s，全部为本地虚拟实例；空目录时请在页面初始化环境）", *addr, *dataDir)
 	if err := http.ListenAndServe(*addr, mux); err != nil {
 		log.Fatal(err)
 	}

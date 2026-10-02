@@ -1,7 +1,7 @@
 import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, Ban, Boxes, FileClock, GitBranch, ListOrdered, OctagonAlert, Pause, Play, RotateCcw, Shrink, SkipForward } from "lucide-react";
+import { Activity, Ban, Boxes, FileClock, GitBranch, Link2, ListOrdered, OctagonAlert, Pause, Play, Plus, RotateCcw, Shrink, SkipForward } from "lucide-react";
 import {
-  createRelease, cancelRelease, finishDrill, subscribe, initEnvironment,
+  addInstance, addRule, createRelease, cancelRelease, finishDrill, subscribe, initEnvironment,
   pauseForReview, reviewContinue, reviewShrink, reviewRollback,
 } from "./api";
 import type { Batch, Snapshot } from "./types";
@@ -52,7 +52,11 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { error: E
           <div className="card fatal">
             <h2><OctagonAlert size={18} /> 页面渲染失败</h2>
             <p className="error">{String(this.state.error.message || this.state.error)}</p>
-            <button className="primary" onClick={() => window.location.reload()}>重新加载</button>
+            <p className="hint">已完成的操作都已持久化在服务端，不会丢失。可以先重试渲染，或重新加载页面。</p>
+            <div className="actions">
+              <button className="primary" onClick={() => this.setState({ error: null })}>重试</button>
+              <button onClick={() => window.location.reload()}>重新加载</button>
+            </div>
           </div>
         </div>
       );
@@ -72,6 +76,7 @@ export function App() {
   const [rollbackN, setRollbackN] = useState(2);
   const [strategy, setStrategy] = useState("rolling");
   const [pauseOnFailure, setPauseOnFailure] = useState(true);
+  const [serviceId, setServiceId] = useState("");
 
   useEffect(
     () =>
@@ -108,6 +113,7 @@ export function App() {
     setError("");
     try {
       await createRelease({
+        serviceId: serviceId || undefined,
         targetVersion: target,
         batchSize: Number(batchSize),
         strategy: strategy as "rolling" | "all_at_once",
@@ -125,6 +131,10 @@ export function App() {
 
   const shownRelease = activeRelease ?? latestRelease;
   const batches = shownRelease ? snap.batches.filter((b) => b.releaseId === shownRelease.id) : [];
+  const serviceName = (id: string) => snap.services.find((s) => s.id === id)?.name ?? id;
+  const releaseDeps = shownRelease
+    ? snap.dependencies.find((d) => d.releaseId === shownRelease.id)
+    : undefined;
 
   return (
     <div className="page">
@@ -173,6 +183,11 @@ export function App() {
 
         <div className="card controls">
           <h2><Play size={18} /> 发起演练发布</h2>
+          <label>目标服务
+            <select value={serviceId || snap.services[0]?.id || ""} onChange={(e) => setServiceId(e.target.value)} disabled={!!activeRelease}>
+              {snap.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
           <label>目标版本
             <select value={target} onChange={(e) => setTarget(e.target.value)} disabled={!!activeRelease}>
               {snap.versions.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}
@@ -228,15 +243,22 @@ export function App() {
           {error && <p className="error">{error}</p>}
           {envEmpty && (
             <div className="init-box">
-              <p className="hint">当前是完全空的演练环境（无版本、无实例、无发布记录）。先初始化环境，再创建演练发布；发布记录只会在你点击“开始”后生成。</p>
+              <p className="hint">当前是完全空的演练环境（无版本、无服务、无实例、无发布记录）。先初始化环境，再创建演练发布；发布记录只会在你点击“开始”后生成。</p>
               <button className="primary" onClick={initEnv} disabled={initializing}>
-                {initializing ? "正在初始化…" : "初始化演练环境（2 个版本 + 6 台实例）"}
+                {initializing ? "正在初始化…" : "初始化演练环境（3 个服务 + 2 个版本 + 6 台实例 + 4 条兼容约束）"}
               </button>
             </div>
           )}
           <p className="hint">取消后不会再扩到后续批次；当前批次中已更新实例会明确回退到原版本。</p>
         </div>
       </section>
+
+      {!envEmpty && (
+        <section className="grid">
+          <ServicesCard snap={snap} onError={setError} />
+          <RulesCard snap={snap} onError={setError} />
+        </section>
+      )}
 
       <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />
 
@@ -246,9 +268,23 @@ export function App() {
             <span className={"pill r-" + shownRelease.status}>{releaseLabel[shownRelease.status] ?? shownRelease.status}</span>
           </h2>
           <p className="sub">
-            目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baseline}</code>，
+            服务 {serviceName(shownRelease.serviceId)} · 目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baseline}</code>，
             策略 {shownRelease.strategy}，每批 {shownRelease.batchSize} 台 · {shownRelease.message ?? "进行中，所有进度实时持久化"}
           </p>
+          {shownRelease.compatBlocked && (
+            <p className="error">兼容约束阻止推进：依赖者必须先更新到兼容版本，之后到审查中选择“继续”。</p>
+          )}
+          {releaseDeps && releaseDeps.pending.length > 0 && (
+            <div className="deps">
+              <strong>未完成依赖：</strong>
+              <ul>
+                {releaseDeps.pending.map((p, i) => <li key={i}>{p}</li>)}
+              </ul>
+            </div>
+          )}
+          {shownRelease.rollbackNote && (
+            <p className="hint">回退评估：{shownRelease.rollbackNote}</p>
+          )}
           {shownRelease.status === "paused" && (
             <PausedReview snap={snap} release={shownRelease} onError={setError} />
           )}
@@ -309,7 +345,7 @@ function PausedReview({
   };
   return (
     <div className="review">
-      <h3><OctagonAlert size={16} /> 暂停审查：第 {pausedBatch ? pausedBatch.index + 1 : "-"} 批出现失败实例</h3>
+      <h3><OctagonAlert size={16} /> 暂停审查：{release.compatBlocked ? "兼容约束未满足，等待依赖者先更新" : "第 " + (pausedBatch ? pausedBatch.index + 1 : "-") + " 批需要人工决定"}</h3>
       <p className="sub">实例状态来自持久化的真实运行记录，刷新或重新打开页面仍停在该状态，审查后再决定走向。</p>
       <p className="hint">暂停后到达的健康结果仍会作为证据显示在每个实例上，但不会改变已经做出的终止决定。</p>
       {decided && (
@@ -371,6 +407,118 @@ function PausedReview({
   );
 }
 
+const ruleModeLabel: Record<string, string> = {
+  update_first: "依赖者必须先更新",
+  stay_old: "依赖者可保持旧版",
+  pause: "推进前需人工审查",
+};
+
+function ServicesCard({ snap, onError }: { snap: Snapshot; onError: (m: string) => void }) {
+  return (
+    <div className="card">
+      <h2><Boxes size={18} /> 虚拟服务（{snap.services.length}）</h2>
+      <table>
+        <thead><tr><th>服务</th><th>实例数</th><th>运行版本</th><th></th></tr></thead>
+        <tbody>
+          {snap.services.map((s) => {
+            const insts = snap.instances.filter((i) => i.serviceId === s.id);
+            const versions = [...new Set(insts.map((i) => i.currentVersion))];
+            return (
+              <tr key={s.id}>
+                <td>{s.name}</td>
+                <td>{insts.length} 台</td>
+                <td>{versions.length ? versions.map((v) => <code key={v}>{v} </code>) : "—"}</td>
+                <td>
+                  <button onClick={() => addInstance(s.id).catch((e) => onError(e.message))}>
+                    <Plus size={14} /> 添加实例
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="hint">新实例创建在服务基线版本上，全部为有持久化记录的本地虚拟实例。</p>
+    </div>
+  );
+}
+
+function RulesCard({ snap, onError }: { snap: Snapshot; onError: (m: string) => void }) {
+  const [providerId, setProviderId] = useState("");
+  const [dependentId, setDependentId] = useState("");
+  const [dependentVersion, setDependentVersion] = useState("");
+  const [maxProviderVersion, setMaxProviderVersion] = useState("");
+  const [mode, setMode] = useState("update_first");
+  const [note, setNote] = useState("");
+  const name = (id: string) => snap.services.find((s) => s.id === id)?.name ?? id;
+  const submit = async () => {
+    try {
+      await addRule({
+        providerId, dependentId, mode: mode as Snapshot["rules"][number]["mode"],
+        dependentVersion: dependentVersion || undefined,
+        maxProviderVersion: maxProviderVersion || undefined,
+        note: note || undefined,
+      });
+      setNote("");
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+  return (
+    <div className="card">
+      <h2><Link2 size={18} /> 服务间兼容约束（{snap.rules.length}）</h2>
+      <table>
+        <thead><tr><th>更新服务</th><th>依赖者</th><th>依赖者版本</th><th>兼容范围</th><th>处理方式</th></tr></thead>
+        <tbody>
+          {snap.rules.map((r) => (
+            <tr key={r.id}>
+              <td>{name(r.providerId)}</td>
+              <td>{name(r.dependentId)}</td>
+              <td><code>{r.dependentVersion || "任意"}</code></td>
+              <td><code>{r.minProviderVersion || "…"} ~ {r.maxProviderVersion || "…"}</code></td>
+              <td>{ruleModeLabel[r.mode] ?? r.mode}{r.note ? "（" + r.note + "）" : ""}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <details className="add-rule">
+        <summary>新增兼容约束</summary>
+        <div className="rule-form">
+          <label>更新服务
+            <select value={providerId} onChange={(e) => setProviderId(e.target.value)}>
+              <option value="">选择…</option>
+              {snap.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
+          <label>依赖者
+            <select value={dependentId} onChange={(e) => setDependentId(e.target.value)}>
+              <option value="">选择…</option>
+              {snap.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
+          <label>依赖者版本（空为任意）
+            <input value={dependentVersion} onChange={(e) => setDependentVersion(e.target.value)} placeholder="v1.0.0" />
+          </label>
+          <label>兼容到的最高版本
+            <input value={maxProviderVersion} onChange={(e) => setMaxProviderVersion(e.target.value)} placeholder="v1.9.9" />
+          </label>
+          <label>不满足时
+            <select value={mode} onChange={(e) => setMode(e.target.value)}>
+              <option value="update_first">依赖者必须先更新（阻止扩批）</option>
+              <option value="stay_old">依赖者可保持旧版（仅提示）</option>
+              <option value="pause">暂停推进待人工审查</option>
+            </select>
+          </label>
+          <label>备注
+            <input value={note} onChange={(e) => setNote(e.target.value)} />
+          </label>
+          <button className="primary" disabled={!providerId || !dependentId} onClick={submit}>保存约束</button>
+        </div>
+      </details>
+    </div>
+  );
+}
+
 // VersionDistribution counts versions across real instance records. Instances
 // still marked rollback_in_progress are reported separately so a rolling-back
 // instance is never counted as a finished rollback (or as a successful new
@@ -423,6 +571,22 @@ function BatchView({ batch, ops }: { batch: Batch; ops: Snapshot["ops"] }) {
         <span className={"pill b-" + batch.phase}>{phaseLabel[batch.phase] ?? batch.phase}</span>
         <span className="when">{timeShort(batch.startedAt)} → {timeShort(batch.finishedAt)}</span>
       </div>
+      {batch.preflight && (
+        <div className="preflight">
+          <strong>生效前依据（{timeShort(batch.preflight.checkedAt)} 评估）：</strong>
+          <ul>
+            {batch.preflight.findings.map((f, i) => (
+              <li key={i} className={f.compatible ? "ok" : "bad"}>
+                {f.compatible ? "兼容" : f.blocking ? "阻止" : "待审查"}：{f.detail}
+              </li>
+            ))}
+            {batch.preflight.findings.length === 0 && <li className="ok">无跨服务约束涉及本批次</li>}
+            {batch.preflight.healthBasis.map((h, i) => (
+              <li key={"h" + i} className="ok">健康依据：{h}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="members">
         {batch.members.map((m) => (
           <div key={m.instanceId} className="member">
