@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"strings"
 	"time"
 
 	"releasectl/internal/store"
@@ -71,6 +72,24 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", "发布已取消，未开始的批次不再扩批")
 			return true
 		}
+		// Compatibility gate: a batch may only take effect when every
+		// cross-service constraint and the health basis hold. The verdicts
+		// are persisted on the batch so a reopen shows exactly why the
+		// batch expanded or is still waiting.
+		checks, blocked := evaluateCompat(tx, rel)
+		if len(blocked) > 0 {
+			reason := "等待兼容约束满足：" + strings.Join(blocked, "；")
+			if !compatEqual(b.Compat, checks) || b.BlockedReason != reason {
+				b.Compat = checks
+				b.BlockedReason = reason
+				rel.Message = reason
+				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 暂不生效："+reason)
+				return true
+			}
+			return false
+		}
+		b.Compat = checks
+		b.BlockedReason = ""
 		b.Phase = "updating"
 		b.StartedAt = nowStr(now)
 		for i := range b.Members {
@@ -228,6 +247,13 @@ func (e *Engine) startBatchRollback(tx *store.Tx, rel *store.Release, b *store.B
 			m.UpdateState = "rolled_back"
 			if m.HealthState == "pending" || m.HealthState == "in_progress" {
 				m.HealthState = "stale"
+			}
+			// The instance never left its version: once the rollback
+			// decision is made, the drill restores the known-good healthy
+			// mark so a later release is not blocked by a stale unhealthy.
+			if inst := findInstance(tx, m.InstanceID); inst != nil && inst.CurrentVersion == m.FromVersion {
+				inst.Health = "healthy"
+				inst.UpdatedAt = nowStr(now)
 			}
 			m.Message = "未完成更新，归宿仍为原版本 " + m.FromVersion
 		}

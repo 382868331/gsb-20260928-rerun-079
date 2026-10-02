@@ -68,6 +68,12 @@ func (e *env) do(t *testing.T, method, target, body string) (int, []byte) {
 }
 
 func (e *env) tickUntil(t *testing.T, wantRelStatus string, timeout time.Duration) store.Snapshot {
+	return e.tickRelease(t, "", wantRelStatus, timeout)
+}
+
+// tickRelease waits until the given release (or any release when id is
+// empty) reaches the wanted status.
+func (e *env) tickRelease(t *testing.T, wantRelID, wantRelStatus string, timeout time.Duration) store.Snapshot {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -83,6 +89,9 @@ func (e *env) tickUntil(t *testing.T, wantRelStatus string, timeout time.Duratio
 			return snap
 		}
 		for _, rr := range snap.Releases {
+			if wantRelID != "" && rr.ID != wantRelID {
+				continue
+			}
 			if rr.Status == wantRelStatus {
 				return snap
 			}
@@ -102,12 +111,14 @@ func TestSnapshotAndSPA(t *testing.T) {
 	var snap struct {
 		Instances []store.Instance `json:"instances"`
 		Versions  []store.Version  `json:"versions"`
+		Services  []store.Service  `json:"services"`
 	}
 	if err := json.Unmarshal(data, &snap); err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.Instances) != 6 || len(snap.Versions) != 2 {
-		t.Fatalf("seed mismatch: %d instances %d versions", len(snap.Instances), len(snap.Versions))
+	if len(snap.Instances) != 10 || len(snap.Versions) != 6 || len(snap.Services) != 3 {
+		t.Fatalf("seed mismatch: %d instances %d versions %d services",
+			len(snap.Instances), len(snap.Versions), len(snap.Services))
 	}
 
 	code, data = e.do(t, http.MethodGet, "/", "")
@@ -121,7 +132,14 @@ func TestSnapshotAndSPA(t *testing.T) {
 
 func TestPausedReleaseHTTPFlow(t *testing.T) {
 	e := newTestEnv(t)
-	code, body := e.do(t, http.MethodPost, "/api/releases", `{"targetVersion":"v2.0.0","batchSize":2,"strategy":"rolling","failure":{"mode":"half_batch","pauseOnFailure":true}}`)
+	// The dependent_first rule requires payment to update before any order
+	// batch may take effect.
+	code, body := e.do(t, http.MethodPost, "/api/releases", `{"targetVersion":"pay-v2.0.0","batchSize":2,"strategy":"rolling","failure":{"mode":"none"}}`)
+	if code != 200 {
+		t.Fatalf("payment release = %d body=%s", code, body)
+	}
+	e.tickUntil(t, "succeeded", 5*time.Second)
+	code, body = e.do(t, http.MethodPost, "/api/releases", `{"targetVersion":"v2.0.0","batchSize":2,"strategy":"rolling","failure":{"mode":"half_batch","pauseOnFailure":true}}`)
 	var rel struct {
 		ID string `json:"id"`
 	}
@@ -142,7 +160,7 @@ func TestPausedReleaseHTTPFlow(t *testing.T) {
 	}
 	snap := e.tickUntil(t, "rolled_back", 5*time.Second)
 	for _, inst := range snap.Instances {
-		if inst.CurrentVersion != "v1.0.0" {
+		if inst.ServiceID == "order" && inst.CurrentVersion != "v1.0.0" {
 			t.Fatalf("instance %s on %s after resumed rollback", inst.ID, inst.CurrentVersion)
 		}
 	}

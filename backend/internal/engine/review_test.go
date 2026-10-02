@@ -13,14 +13,15 @@ import (
 func TestManualPauseReviewContinue(t *testing.T) {
 	dir := t.TempDir()
 	svc := newService(t, dir)
+	now := t0
+	upgradePayment(t, svc, &now)
 	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
 		TargetVersion: "v2.0.0", BatchSize: 2, Failure: store.FailureSpec{Mode: "none"},
-	}, t0)
+	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	now := t0
 	runUntil(t, svc, &now, 150*time.Millisecond)
 	if err := svc.PauseForReview(rel.ID, now); err != nil {
 		t.Fatal(err)
@@ -38,9 +39,14 @@ func TestManualPauseReviewContinue(t *testing.T) {
 	var r0 store.Release
 	var batches []store.Batch
 	st.View(func(tx *store.Tx) {
-		r0 = tx.Releases()[0]
+		for _, rr := range tx.Releases() {
+			if rr.ID == rel.ID {
+				r0 = rr
+			}
+		}
 		batches = append([]store.Batch(nil), tx.Batches()...)
 	})
+	batches = releaseBatchesOf(batches, rel.ID)
 	if r0.Status != "paused" || !r0.PauseRequested {
 		t.Fatalf("want paused+pauseRequested, got %s/%v", r0.Status, r0.PauseRequested)
 	}
@@ -62,10 +68,15 @@ func TestManualPauseReviewContinue(t *testing.T) {
 	var insts []store.Instance
 	st2 := snapshotStore(t, dir)
 	st2.View(func(tx *store.Tx) {
-		r0 = tx.Releases()[0]
+		for _, rr := range tx.Releases() {
+			if rr.ID == rel.ID {
+				r0 = rr
+			}
+		}
 		batches = append([]store.Batch(nil), tx.Batches()...)
 		insts = append([]store.Instance(nil), tx.Instances()...)
 	})
+	batches = releaseBatchesOf(batches, rel.ID)
 	if r0.Status != "succeeded" {
 		t.Fatalf("status = %s, want succeeded", r0.Status)
 	}
@@ -74,7 +85,7 @@ func TestManualPauseReviewContinue(t *testing.T) {
 			t.Fatalf("batch %d = %s, want succeeded", b.Index, b.Phase)
 		}
 	}
-	for _, inst := range insts {
+	for _, inst := range orderInstances(insts) {
 		if inst.CurrentVersion != "v2.0.0" {
 			t.Fatalf("instance %s = %s", inst.ID, inst.CurrentVersion)
 		}
@@ -86,13 +97,14 @@ func TestManualPauseReviewContinue(t *testing.T) {
 func TestManualPauseReviewShrink(t *testing.T) {
 	dir := t.TempDir()
 	svc := newService(t, dir)
+	now := t0
+	upgradePayment(t, svc, &now)
 	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
 		TargetVersion: "v2.0.0", BatchSize: 3, Failure: store.FailureSpec{Mode: "none"},
-	}, t0)
+	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := t0
 	runUntil(t, svc, &now, 150*time.Millisecond)
 	if err := svc.PauseForReview(rel.ID, now); err != nil {
 		t.Fatal(err)
@@ -110,10 +122,15 @@ func TestManualPauseReviewShrink(t *testing.T) {
 	var batches []store.Batch
 	var insts []store.Instance
 	snapshotStore(t, dir).View(func(tx *store.Tx) {
-		r0 = tx.Releases()[0]
+		for _, rr := range tx.Releases() {
+			if rr.ID == rel.ID {
+				r0 = rr
+			}
+		}
 		batches = append([]store.Batch(nil), tx.Batches()...)
 		insts = append([]store.Instance(nil), tx.Instances()...)
 	})
+	batches = releaseBatchesOf(batches, rel.ID)
 	if r0.Status != "succeeded" {
 		t.Fatalf("status = %s", r0.Status)
 	}
@@ -128,7 +145,7 @@ func TestManualPauseReviewShrink(t *testing.T) {
 			t.Fatalf("batch %d members = %d, want 1", i, len(batches[i].Members))
 		}
 	}
-	for _, inst := range insts {
+	for _, inst := range orderInstances(insts) {
 		if inst.CurrentVersion != "v2.0.0" {
 			t.Fatalf("instance %s = %s", inst.ID, inst.CurrentVersion)
 		}
@@ -150,13 +167,14 @@ func TestReviewRollbackLateEvidence(t *testing.T) {
 	if err := svc.Seed(t0); err != nil {
 		t.Fatal(err)
 	}
+	now := t0
+	upgradePayment(t, svc, &now)
 	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
 		TargetVersion: "v2.0.0", BatchSize: 2, Failure: store.FailureSpec{Mode: "none"},
-	}, t0)
+	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := t0
 	for i := 0; i < 3; i++ {
 		now = now.Add(30 * time.Millisecond)
 		_ = svc.Engine().Tick(now)
@@ -178,11 +196,16 @@ func TestReviewRollbackLateEvidence(t *testing.T) {
 	var insts []store.Instance
 	var ops []store.Op
 	st.View(func(tx *store.Tx) {
-		r0 = tx.Releases()[0]
+		for _, rr := range tx.Releases() {
+			if rr.ID == rel.ID {
+				r0 = rr
+			}
+		}
 		batches = append([]store.Batch(nil), tx.Batches()...)
 		insts = append([]store.Instance(nil), tx.Instances()...)
 		ops = append([]store.Op(nil), tx.Ops()...)
 	})
+	batches = releaseBatchesOf(batches, rel.ID)
 	if r0.Status != "rolled_back" {
 		t.Fatalf("status = %s, want rolled_back", r0.Status)
 	}
@@ -207,7 +230,7 @@ func TestReviewRollbackLateEvidence(t *testing.T) {
 	if lateEvidence == 0 {
 		t.Fatal("expected late health evidence to remain queryable after rollback")
 	}
-	for _, inst := range insts {
+	for _, inst := range orderInstances(insts) {
 		if inst.CurrentVersion != "v1.0.0" || inst.Health != "healthy" {
 			t.Fatalf("instance %s = %s/%s", inst.ID, inst.CurrentVersion, inst.Health)
 		}
@@ -229,13 +252,14 @@ func TestManualPauseCancelLateEvidence(t *testing.T) {
 	if err := svc.Seed(t0); err != nil {
 		t.Fatal(err)
 	}
+	now := t0
+	upgradePayment(t, svc, &now)
 	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
 		TargetVersion: "v2.0.0", BatchSize: 2, Failure: store.FailureSpec{Mode: "none"},
-	}, t0)
+	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := t0
 	for i := 0; i < 3; i++ {
 		now = now.Add(30 * time.Millisecond)
 		_ = svc.Engine().Tick(now)
@@ -253,13 +277,17 @@ func TestManualPauseCancelLateEvidence(t *testing.T) {
 	var r0 store.Release
 	var insts []store.Instance
 	st.View(func(tx *store.Tx) {
-		r0 = tx.Releases()[0]
+		for _, rr := range tx.Releases() {
+			if rr.ID == rel.ID {
+				r0 = rr
+			}
+		}
 		insts = append([]store.Instance(nil), tx.Instances()...)
 	})
 	if r0.Status != "cancelled" {
 		t.Fatalf("status = %s, want cancelled", r0.Status)
 	}
-	for _, inst := range insts {
+	for _, inst := range orderInstances(insts) {
 		if inst.CurrentVersion != "v1.0.0" {
 			t.Fatalf("instance %s = %s", inst.ID, inst.CurrentVersion)
 		}

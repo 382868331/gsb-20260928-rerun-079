@@ -1,5 +1,26 @@
+export interface Service {
+  id: string;
+  name: string;
+}
+
+export interface CompatRule {
+  id: string;
+  dependentId: string;
+  dependencyId: string;
+  mode: "dependent_first" | "stay_old" | "pause";
+  note: string;
+}
+
+export interface CompatCheck {
+  serviceId: string;
+  kind: "compat" | "health";
+  ok: boolean;
+  detail: string;
+}
+
 export interface Version {
   id: string;
+  serviceId: string;
   name: string;
   artifactRef: string;
   createdAt: string;
@@ -7,6 +28,7 @@ export interface Version {
 
 export interface Instance {
   id: string;
+  serviceId: string;
   name: string;
   currentVersion: string;
   desiredVersion: string;
@@ -34,6 +56,8 @@ export interface Batch {
   phase: "pending" | "updating" | "observing" | "paused" | "succeeded" | "failed" | "cancelling" | "rolling_back" | "rolled_back" | "cancelled";
   targetVersion: string;
   members: MemberState[];
+  compat?: CompatCheck[];
+  blockedReason?: string;
   startedAt?: string;
   finishedAt?: string;
 }
@@ -47,6 +71,7 @@ export interface FailureSpec {
 
 export interface Release {
   id: string;
+  serviceId: string;
   targetVersion: string;
   baseline: string;
   strategy: string;
@@ -61,6 +86,7 @@ export interface Release {
   reviewAction?: "" | "continue" | "shrink" | "rollback" | "finish" | "cancel";
   reviewShrinkTo?: number;
   reviewAt?: string;
+  rollbackImpact?: string[];
   createdAt: string;
   finishedAt?: string;
   message?: string;
@@ -90,6 +116,8 @@ export interface Event {
 }
 
 export interface Snapshot {
+  services: Service[];
+  compatRules: CompatRule[];
   versions: Version[];
   instances: Instance[];
   releases: Release[];

@@ -13,6 +13,8 @@ import (
 type Store struct {
 	mu        sync.Mutex
 	dir       string
+	services  []Service
+	rules     []CompatRule
 	versions  []Version
 	instances []Instance
 	releases  []Release
@@ -34,6 +36,12 @@ func Open(dir string) (*Store, error) {
 		}
 		return nil
 	}
+	if err := must("services.json", &s.services); err != nil {
+		return nil, err
+	}
+	if err := must("compat.json", &s.rules); err != nil {
+		return nil, err
+	}
 	if err := must("versions.json", &s.versions); err != nil {
 		return nil, err
 	}
@@ -51,6 +59,32 @@ func Open(dir string) (*Store, error) {
 	}
 	if err := must("events.json", &s.events); err != nil {
 		return nil, err
+	}
+	// Never hand out nil slices: they would marshal as JSON null and break
+	// clients that iterate the collections (the empty-environment crash).
+	if s.services == nil {
+		s.services = []Service{}
+	}
+	if s.rules == nil {
+		s.rules = []CompatRule{}
+	}
+	if s.versions == nil {
+		s.versions = []Version{}
+	}
+	if s.instances == nil {
+		s.instances = []Instance{}
+	}
+	if s.releases == nil {
+		s.releases = []Release{}
+	}
+	if s.batches == nil {
+		s.batches = []Batch{}
+	}
+	if s.ops == nil {
+		s.ops = []Op{}
+	}
+	if s.events == nil {
+		s.events = []Event{}
 	}
 	s.eventSeq = int64(len(s.events))
 	return s, nil
@@ -92,18 +126,22 @@ func (s *Store) View(fn func(tx *Tx)) {
 
 type Tx struct{ s *Store }
 
-func (tx *Tx) Versions() []Version   { return tx.s.versions }
-func (tx *Tx) Instances() []Instance { return tx.s.instances }
-func (tx *Tx) Releases() []Release   { return tx.s.releases }
-func (tx *Tx) Batches() []Batch      { return tx.s.batches }
-func (tx *Tx) Ops() []Op             { return tx.s.ops }
-func (tx *Tx) Events() []Event       { return tx.s.events }
+func (tx *Tx) Services() []Service       { return tx.s.services }
+func (tx *Tx) CompatRules() []CompatRule { return tx.s.rules }
+func (tx *Tx) Versions() []Version       { return tx.s.versions }
+func (tx *Tx) Instances() []Instance     { return tx.s.instances }
+func (tx *Tx) Releases() []Release       { return tx.s.releases }
+func (tx *Tx) Batches() []Batch          { return tx.s.batches }
+func (tx *Tx) Ops() []Op                 { return tx.s.ops }
+func (tx *Tx) Events() []Event           { return tx.s.events }
 
-func (tx *Tx) SetVersions(v []Version)   { tx.s.versions = v }
-func (tx *Tx) SetInstances(v []Instance) { tx.s.instances = v }
-func (tx *Tx) SetReleases(v []Release)   { tx.s.releases = v }
-func (tx *Tx) SetBatches(v []Batch)      { tx.s.batches = v }
-func (tx *Tx) SetOps(v []Op)             { tx.s.ops = v }
+func (tx *Tx) SetServices(v []Service)       { tx.s.services = v }
+func (tx *Tx) SetCompatRules(v []CompatRule) { tx.s.rules = v }
+func (tx *Tx) SetVersions(v []Version)       { tx.s.versions = v }
+func (tx *Tx) SetInstances(v []Instance)     { tx.s.instances = v }
+func (tx *Tx) SetReleases(v []Release)       { tx.s.releases = v }
+func (tx *Tx) SetBatches(v []Batch)          { tx.s.batches = v }
+func (tx *Tx) SetOps(v []Op)                 { tx.s.ops = v }
 
 func (tx *Tx) AddEvent(at, releaseID, batchID, instanceID, level, msg string) {
 	tx.s.eventSeq++
@@ -118,6 +156,8 @@ func (s *Store) flush() error {
 		name string
 		val  any
 	}{
+		{"services.json", s.services},
+		{"compat.json", s.rules},
 		{"versions.json", s.versions},
 		{"instances.json", s.instances},
 		{"releases.json", s.releases},

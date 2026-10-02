@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,14 @@ func TestEmptyStateThenInit(t *testing.T) {
 	if len(snap.Versions) != 0 || len(snap.Instances) != 0 || len(snap.Releases) != 0 {
 		t.Fatalf("fresh directory must be empty, got %d/%d/%d", len(snap.Versions), len(snap.Instances), len(snap.Releases))
 	}
+	// The empty snapshot must serialize collections as [] rather than null:
+	// a null array is what crashed the first render of an empty environment.
+	body := rec.Body.String()
+	for _, key := range []string{"services", "compatRules", "versions", "instances", "releases", "batches", "ops", "events"} {
+		if !strings.Contains(body, `"`+key+`":[]`) {
+			t.Fatalf("empty snapshot field %s must be [], body=%s", key, body)
+		}
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/environment/init", nil)
 	rec = httptest.NewRecorder()
@@ -45,15 +54,22 @@ func TestEmptyStateThenInit(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &snap); err != nil {
 		t.Fatal(err)
 	}
-	if len(snap.Versions) != 2 || len(snap.Instances) != 6 || len(snap.Releases) != 0 {
-		t.Fatalf("after init want 2 versions/6 instances/0 releases, got %d/%d/%d",
+	if len(snap.Versions) != 6 || len(snap.Instances) != 10 || len(snap.Releases) != 0 {
+		t.Fatalf("after init want 6 versions/10 instances/0 releases, got %d/%d/%d",
 			len(snap.Versions), len(snap.Instances), len(snap.Releases))
 	}
 }
 
 func TestPauseReviewShrinkHTTP(t *testing.T) {
 	e := newTestEnv(t)
+	// Payment must update first (dependent_first compat rule).
 	code, body := e.do(t, http.MethodPost, "/api/releases",
+		`{"targetVersion":"pay-v2.0.0","batchSize":2,"strategy":"rolling","failure":{"mode":"none"}}`)
+	if code != 200 {
+		t.Fatalf("payment release = %d %s", code, body)
+	}
+	e.tickUntil(t, "succeeded", 5*time.Second)
+	code, body = e.do(t, http.MethodPost, "/api/releases",
 		`{"targetVersion":"v2.0.0","batchSize":3,"strategy":"rolling","failure":{"mode":"none"}}`)
 	if code != 200 {
 		t.Fatalf("create = %d %s", code, body)
@@ -76,6 +92,9 @@ func TestPauseReviewShrinkHTTP(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, b := range s.Batches {
+			if b.ReleaseID != rel.ID {
+				continue
+			}
 			if b.Index == 0 {
 				all := len(b.Members) > 0
 				for _, m := range b.Members {
@@ -98,18 +117,30 @@ func TestPauseReviewShrinkHTTP(t *testing.T) {
 		t.Fatalf("pause = %d", code)
 	}
 	snap := e.tickUntil(t, "paused", 3*time.Second)
-	if snap.Releases[0].ReviewAction != "" {
+	var rel0 store.Release
+	for _, rr := range snap.Releases {
+		if rr.ID == rel.ID {
+			rel0 = rr
+		}
+	}
+	if rel0.ReviewAction != "" {
 		t.Fatal("no review decision before the operator chooses")
 	}
 	if code, _ = e.do(t, http.MethodPost, "/api/releases/"+rel.ID+"/review/shrink", `{"batchSize":1}`); code != 202 {
 		t.Fatalf("shrink = %d", code)
 	}
-	snap = e.tickUntil(t, "succeeded", 5*time.Second)
-	if len(snap.Batches) != 4 {
-		t.Fatalf("batches = %d, want 4", len(snap.Batches))
+	snap = e.tickRelease(t, rel.ID, "succeeded", 5*time.Second)
+	orderBatches := 0
+	for _, b := range snap.Batches {
+		if b.ReleaseID == rel.ID {
+			orderBatches++
+		}
+	}
+	if orderBatches != 4 {
+		t.Fatalf("order batches = %d, want 4", orderBatches)
 	}
 	for _, inst := range snap.Instances {
-		if inst.CurrentVersion != "v2.0.0" {
+		if inst.ServiceID == "order" && inst.CurrentVersion != "v2.0.0" {
 			t.Fatalf("instance %s = %s", inst.ID, inst.CurrentVersion)
 		}
 	}

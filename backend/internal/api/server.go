@@ -45,12 +45,14 @@ func (s *Server) snapshot() store.Snapshot {
 	var snap store.Snapshot
 	s.st.View(func(tx *store.Tx) {
 		snap = store.Snapshot{
-			Versions:  append([]store.Version(nil), tx.Versions()...),
-			Instances: append([]store.Instance(nil), tx.Instances()...),
-			Releases:  append([]store.Release(nil), tx.Releases()...),
-			Batches:   append([]store.Batch(nil), tx.Batches()...),
-			Ops:       append([]store.Op(nil), tx.Ops()...),
-			Events:    append([]store.Event(nil), tx.Events()...),
+			Services:    append([]store.Service{}, tx.Services()...),
+			CompatRules: append([]store.CompatRule{}, tx.CompatRules()...),
+			Versions:    append([]store.Version{}, tx.Versions()...),
+			Instances:   append([]store.Instance{}, tx.Instances()...),
+			Releases:    append([]store.Release{}, tx.Releases()...),
+			Batches:     append([]store.Batch{}, tx.Batches()...),
+			Ops:         append([]store.Op{}, tx.Ops()...),
+			Events:      append([]store.Event{}, tx.Events()...),
 		}
 	})
 	return snap

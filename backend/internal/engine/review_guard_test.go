@@ -14,14 +14,15 @@ import (
 func TestFailurePauseRejectsContinueAndShrink(t *testing.T) {
 	dir := t.TempDir()
 	svc := newService(t, dir)
+	now := t0
+	upgradePayment(t, svc, &now)
 	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
 		TargetVersion: "v2.0.0", BatchSize: 2,
 		Failure: store.FailureSpec{Mode: "half_batch", PauseOnFailure: true},
-	}, t0)
+	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := t0
 	runUntil(t, svc, &now, 2*time.Second)
 
 	if err := svc.ReviewContinue(rel.ID, now); err == nil {
@@ -38,12 +39,17 @@ func TestFailurePauseRejectsContinueAndShrink(t *testing.T) {
 	}
 	runUntil(t, svc2, &now, 2*time.Second)
 	snapshotStore(t, dir).View(func(tx *store.Tx) {
-		r := tx.Releases()[0]
+		var r store.Release
+		for _, rr := range tx.Releases() {
+			if rr.ID == rel.ID {
+				r = rr
+			}
+		}
 		if r.Status != "rolled_back" || r.ReviewAction != "rollback" {
 			t.Fatalf("status=%s action=%s", r.Status, r.ReviewAction)
 		}
 		for _, b := range tx.Batches() {
-			if b.Index > 0 && b.Phase != "pending" {
+			if b.ReleaseID == rel.ID && b.Index > 0 && b.Phase != "pending" {
 				t.Fatalf("later batch %d expanded: %s", b.Index, b.Phase)
 			}
 		}

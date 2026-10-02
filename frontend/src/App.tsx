@@ -65,6 +65,7 @@ export function App() {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string>("");
   const [initializing, setInitializing] = useState(false);
+  const [serviceId, setServiceId] = useState("order");
   const [target, setTarget] = useState("v2.0.0");
   const [batchSize, setBatchSize] = useState(2);
   const [mode, setMode] = useState("none");
@@ -82,15 +83,21 @@ export function App() {
     []
   );
 
-  const activeRelease = useMemo(
-    () => snap?.releases.find((r) => !["succeeded", "rolled_back", "cancelled", "failed"].includes(r.status)),
+  const terminal = ["succeeded", "rolled_back", "cancelled", "failed"];
+  const activeReleases = useMemo(
+    () => (snap?.releases ?? []).filter((r) => !terminal.includes(r.status)),
     [snap]
   );
-  const latestRelease = snap?.releases[snap.releases.length - 1];
 
   if (!snap) return <div className="loading">正在加载演练状态…</div>;
 
   const envEmpty = snap.versions.length === 0 && snap.instances.length === 0;
+  const serviceName = (id: string) => snap.services.find((s) => s.id === id)?.name ?? id;
+  const serviceVersions = snap.versions.filter((v) => v.serviceId === serviceId);
+  const activeForService = activeReleases.find((r) => r.serviceId === serviceId);
+  const effectiveTarget = serviceVersions.some((v) => v.id === target)
+    ? target
+    : serviceVersions[serviceVersions.length - 1]?.id ?? "";
 
   const initEnv = async () => {
     setError("");
@@ -108,7 +115,7 @@ export function App() {
     setError("");
     try {
       await createRelease({
-        targetVersion: target,
+        targetVersion: effectiveTarget,
         batchSize: Number(batchSize),
         strategy: strategy as "rolling" | "all_at_once",
         failure: {
@@ -123,8 +130,11 @@ export function App() {
     }
   };
 
-  const shownRelease = activeRelease ?? latestRelease;
-  const batches = shownRelease ? snap.batches.filter((b) => b.releaseId === shownRelease.id) : [];
+  const latestTerminal = [...snap.releases].reverse().find((r) => terminal.includes(r.status));
+  const shownReleases = [...activeReleases];
+  if (latestTerminal && !shownReleases.some((r) => r.id === latestTerminal.id)) {
+    shownReleases.push(latestTerminal);
+  }
 
   return (
     <div className="page">
@@ -137,10 +147,11 @@ export function App() {
         <div className="card">
           <h2><GitBranch size={18} /> 版本</h2>
           <table>
-            <thead><tr><th>版本</th><th>名称</th><th>构建时间</th></tr></thead>
+            <thead><tr><th>服务</th><th>版本</th><th>名称</th><th>构建时间</th></tr></thead>
             <tbody>
               {snap.versions.map((v) => (
-                <tr key={v.id} className={v.id === target ? "selected" : ""}>
+                <tr key={v.id} className={v.id === effectiveTarget ? "selected" : ""}>
+                  <td>{serviceName(v.serviceId)}</td>
                   <td><code>{v.id}</code></td><td>{v.name}</td><td>{timeShort(v.createdAt)}</td>
                 </tr>
               ))}
@@ -154,10 +165,11 @@ export function App() {
         <div className="card">
           <h2><Activity size={18} /> 虚拟实例（{snap.instances.length}）</h2>
           <table>
-            <thead><tr><th>实例</th><th>当前版本</th><th>期望归宿</th><th>健康</th></tr></thead>
+            <thead><tr><th>服务</th><th>实例</th><th>当前版本</th><th>期望归宿</th><th>健康</th></tr></thead>
             <tbody>
               {snap.instances.map((i) => (
                 <tr key={i.id}>
+                  <td>{serviceName(i.serviceId)}</td>
                   <td>{i.name}</td>
                   <td><code>{i.currentVersion}</code></td>
                   <td><code>{i.desiredVersion}</code></td>
@@ -167,29 +179,34 @@ export function App() {
             </tbody>
           </table>
           {snap.instances.length === 0 && (
-            <p className="empty">暂无虚拟实例：初始化后将创建 6 台运行基线版本的实例。</p>
+            <p className="empty">暂无虚拟实例：初始化后将创建 3 个服务共 10 台运行基线版本的实例。</p>
           )}
         </div>
 
         <div className="card controls">
           <h2><Play size={18} /> 发起演练发布</h2>
+          <label>服务
+            <select value={serviceId} onChange={(e) => setServiceId(e.target.value)} disabled={!!activeForService}>
+              {snap.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </label>
           <label>目标版本
-            <select value={target} onChange={(e) => setTarget(e.target.value)} disabled={!!activeRelease}>
-              {snap.versions.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}
+            <select value={effectiveTarget} onChange={(e) => setTarget(e.target.value)} disabled={!!activeForService}>
+              {serviceVersions.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}
             </select>
           </label>
           <label>发布策略
-            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={!!activeRelease}>
+            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={!!activeForService}>
               <option value="rolling">分批滚动（按批次逐步扩批）</option>
               <option value="all_at_once">全量一次性（全部实例同批）</option>
             </select>
           </label>
           <label>每批实例数
-            <input type="number" min={1} max={snap.instances.length} value={batchSize}
-              disabled={!!activeRelease || strategy === "all_at_once"} onChange={(e) => setBatchSize(Number(e.target.value))} />
+            <input type="number" min={1} max={snap.instances.filter((i) => i.serviceId === serviceId).length} value={batchSize}
+              disabled={!!activeForService || strategy === "all_at_once"} onChange={(e) => setBatchSize(Number(e.target.value))} />
           </label>
           <label>故障注入
-            <select value={mode} onChange={(e) => setMode(e.target.value)} disabled={!!activeRelease}>
+            <select value={mode} onChange={(e) => setMode(e.target.value)} disabled={!!activeForService}>
               <option value="none">无故障（正常发布）</option>
               <option value="half_batch">半批健康失败（首批前一半）</option>
               <option value="instances">指定实例健康失败</option>
@@ -198,29 +215,29 @@ export function App() {
           </label>
           {mode === "instances" && (
             <label>失败实例 ID（逗号分隔）
-              <input value={failInstances} onChange={(e) => setFailInstances(e.target.value)} disabled={!!activeRelease} />
+              <input value={failInstances} onChange={(e) => setFailInstances(e.target.value)} disabled={!!activeForService} />
             </label>
           )}
           {mode === "rollback_interrupt" && (
             <label>每台实例回退中断次数
-              <input type="number" min={1} value={rollbackN} disabled={!!activeRelease}
+              <input type="number" min={1} value={rollbackN} disabled={!!activeForService}
                 onChange={(e) => setRollbackN(Number(e.target.value))} />
             </label>
           )}
           <label className="check">
-            <input type="checkbox" checked={pauseOnFailure} disabled={!!activeRelease}
+            <input type="checkbox" checked={pauseOnFailure} disabled={!!activeForService}
               onChange={(e) => setPauseOnFailure(e.target.checked)} />
             失败后暂停，审查失败实例再决定继续回退或结束
           </label>
           <div className="actions">
-            <button className="primary" onClick={submit} disabled={!!activeRelease || envEmpty}>开始按批次发布</button>
-            {activeRelease && !activeRelease.pauseRequested && activeRelease.status !== "paused" && (
-              <button onClick={() => pauseForReview(activeRelease.id).catch((e) => setError(e.message))}>
+            <button className="primary" onClick={submit} disabled={!!activeForService || envEmpty || !effectiveTarget}>开始按批次发布</button>
+            {activeForService && !activeForService.pauseRequested && activeForService.status !== "paused" && (
+              <button onClick={() => pauseForReview(activeForService.id).catch((e) => setError(e.message))}>
                 <Pause size={15} /> 暂停审查
               </button>
             )}
-            {activeRelease && (
-              <button className="danger" onClick={() => cancelRelease(activeRelease.id).catch((e) => setError(e.message))}>
+            {activeForService && (
+              <button className="danger" onClick={() => cancelRelease(activeForService.id).catch((e) => setError(e.message))}>
                 <Ban size={15} /> 取消发布
               </button>
             )}
@@ -230,32 +247,46 @@ export function App() {
             <div className="init-box">
               <p className="hint">当前是完全空的演练环境（无版本、无实例、无发布记录）。先初始化环境，再创建演练发布；发布记录只会在你点击“开始”后生成。</p>
               <button className="primary" onClick={initEnv} disabled={initializing}>
-                {initializing ? "正在初始化…" : "初始化演练环境（2 个版本 + 6 台实例）"}
+                {initializing ? "正在初始化…" : "初始化演练环境（3 个服务 + 10 台实例）"}
               </button>
             </div>
           )}
-          <p className="hint">取消后不会再扩到后续批次；当前批次中已更新实例会明确回退到原版本。</p>
+          <p className="hint">取消后不会再扩到后续批次；当前批次中已更新实例会明确回退到原版本。每个批次生效前都会先检查服务间的版本兼容约束与相关服务的健康依据。</p>
         </div>
       </section>
 
-      <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />
-
-      {shownRelease ? (
-        <section className="card release">
-          <h2><ListOrdered size={18} /> 发布 {shownRelease.id}
-            <span className={"pill r-" + shownRelease.status}>{releaseLabel[shownRelease.status] ?? shownRelease.status}</span>
-          </h2>
-          <p className="sub">
-            目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baseline}</code>，
-            策略 {shownRelease.strategy}，每批 {shownRelease.batchSize} 台 · {shownRelease.message ?? "进行中，所有进度实时持久化"}
-          </p>
-          {shownRelease.status === "paused" && (
-            <PausedReview snap={snap} release={shownRelease} onError={setError} />
-          )}
-          <div className="batches">
-            {batches.map((b) => <BatchView key={b.id} batch={b} ops={snap.ops} />)}
+      {snap.services.length > 0 && (
+        <section className="card">
+          <h2><Boxes size={18} /> 服务与版本兼容约束</h2>
+          <div className="services">
+            {snap.services.map((s) => {
+              const insts = snap.instances.filter((i) => i.serviceId === s.id);
+              const vers = [...new Set(insts.map((i) => i.currentVersion))];
+              return (
+                <div key={s.id} className="service-box">
+                  <strong>{s.name}</strong>
+                  <span className="hint">{insts.length} 台实例 · 当前 {vers.map((v) => <code key={v}>{v}</code>)}</span>
+                </div>
+              );
+            })}
           </div>
+          <ul className="rule-list">
+            {snap.compatRules.map((r) => (
+              <li key={r.id}>
+                <span className={"pill rule-" + r.mode}>{ruleModeLabel(r.mode)}</span>
+                {r.note}
+              </li>
+            ))}
+          </ul>
         </section>
+      )}
+
+      <VersionDistribution snap={snap} batches={snap.batches.filter((b) => shownReleases.some((r) => r.id === b.releaseId))} />
+
+      {shownReleases.length > 0 ? (
+        shownReleases.map((rel) => (
+          <ReleaseSection key={rel.id} snap={snap} release={rel} serviceName={serviceName} onError={setError} />
+        ))
       ) : (
         <section className="card release empty-release">
           <h2><ListOrdered size={18} /> 发布状态</h2>
@@ -279,6 +310,56 @@ export function App() {
         </div>
       </section>
     </div>
+  );
+}
+
+function ruleModeLabel(mode: string): string {
+  const m: Record<string, string> = {
+    dependent_first: "依赖者先更新",
+    stay_old: "保持旧版",
+    pause: "暂停推进",
+  };
+  return m[mode] ?? mode;
+}
+
+// ReleaseSection renders one release (active or the latest finished one)
+// with its batches, compat evidence and rollback impact.
+function ReleaseSection({
+  snap,
+  release,
+  serviceName,
+  onError,
+}: {
+  snap: Snapshot;
+  release: Snapshot["releases"][number];
+  serviceName: (id: string) => string;
+  onError: (m: string) => void;
+}) {
+  const batches = snap.batches.filter((b) => b.releaseId === release.id);
+  return (
+    <section className="card release">
+      <h2><ListOrdered size={18} /> 发布 {release.id}（{serviceName(release.serviceId)}）
+        <span className={"pill r-" + release.status}>{releaseLabel[release.status] ?? release.status}</span>
+      </h2>
+      <p className="sub">
+        目标 <code>{release.targetVersion}</code>，基线 <code>{release.baseline}</code>，
+        策略 {release.strategy}，每批 {release.batchSize} 台 · {release.message ?? "进行中，所有进度实时持久化"}
+      </p>
+      {release.status === "paused" && (
+        <PausedReview snap={snap} release={release} onError={onError} />
+      )}
+      {(release.rollbackImpact?.length ?? 0) > 0 && (
+        <div className="impact">
+          <h3><RotateCcw size={15} /> 回退影响说明</h3>
+          <ul>
+            {release.rollbackImpact!.map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        </div>
+      )}
+      <div className="batches">
+        {batches.map((b) => <BatchView key={b.id} batch={b} ops={snap.ops} serviceName={serviceName} />)}
+      </div>
+    </section>
   );
 }
 
@@ -414,7 +495,7 @@ function VersionDistribution({ snap, batches }: { snap: Snapshot; batches: Batch
   );
 }
 
-function BatchView({ batch, ops }: { batch: Batch; ops: Snapshot["ops"] }) {
+function BatchView({ batch, ops, serviceName }: { batch: Batch; ops: Snapshot["ops"]; serviceName: (id: string) => string }) {
   const pendingOps = ops.filter((o) => o.batchId === batch.id);
   return (
     <div className={"batch ph-" + batch.phase}>
@@ -423,6 +504,18 @@ function BatchView({ batch, ops }: { batch: Batch; ops: Snapshot["ops"] }) {
         <span className={"pill b-" + batch.phase}>{phaseLabel[batch.phase] ?? batch.phase}</span>
         <span className="when">{timeShort(batch.startedAt)} → {timeShort(batch.finishedAt)}</span>
       </div>
+      {batch.blockedReason && (
+        <p className="blocked"><OctagonAlert size={14} /> {batch.blockedReason}（约束满足后自动继续，已完成的操作不会丢失）</p>
+      )}
+      {(batch.compat?.length ?? 0) > 0 && (
+        <ul className="compat-list">
+          {batch.compat!.map((c, i) => (
+            <li key={i} className={c.ok ? "ok" : "bad"}>
+              {c.ok ? "✓" : "✗"} [{c.kind === "health" ? "健康" : "兼容"}·{serviceName(c.serviceId)}] {c.detail}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="members">
         {batch.members.map((m) => (
           <div key={m.instanceId} className="member">

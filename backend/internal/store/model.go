@@ -1,9 +1,43 @@
 package store
 
+// Service is a virtual service. Services depend on each other; the
+// compatibility constraints between them live in CompatRule records.
+type Service struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// CompatRule constrains how a dependent service must behave while its
+// dependency is being updated:
+//   - dependent_first: the dependent must finish its own update before the
+//     dependency's batches may take effect.
+//   - stay_old: the dependent must stay on its baseline (no update) while
+//     the dependency is updating.
+//   - pause: the dependent must not be actively advancing while the
+//     dependency updates (its own release must pause or finish first).
+type CompatRule struct {
+	ID           string `json:"id"`
+	DependentID  string `json:"dependentId"`
+	DependencyID string `json:"dependencyId"`
+	Mode         string `json:"mode"` // dependent_first | stay_old | pause
+	Note         string `json:"note"`
+}
+
+// CompatCheck is one persisted compatibility/health verdict evaluated right
+// before a batch takes effect. It is the evidence for why a batch was
+// allowed to expand or is still waiting.
+type CompatCheck struct {
+	ServiceID string `json:"serviceId"`
+	Kind      string `json:"kind"` // compat | health
+	OK        bool   `json:"ok"`
+	Detail    string `json:"detail"`
+}
+
 // Version is an immutable artifact record. Versions, instances and release
 // batches are stored in separate files on purpose.
 type Version struct {
 	ID          string `json:"id"`
+	ServiceID   string `json:"serviceId"`
 	Name        string `json:"name"`
 	ArtifactRef string `json:"artifactRef"`
 	CreatedAt   string `json:"createdAt"`
@@ -13,6 +47,7 @@ type Version struct {
 // converges back to when no release is active (the known-good baseline).
 type Instance struct {
 	ID             string `json:"id"`
+	ServiceID      string `json:"serviceId"`
 	Name           string `json:"name"`
 	CurrentVersion string `json:"currentVersion"`
 	DesiredVersion string `json:"desiredVersion"`
@@ -46,6 +81,11 @@ type Batch struct {
 	Phase         string        `json:"phase"` // pending|updating|observing|succeeded|failed|cancelling|rolling_back|rolled_back|cancelled
 	TargetVersion string        `json:"targetVersion"`
 	Members       []MemberState `json:"members"`
+	// Compat records the compatibility and health evidence evaluated before
+	// this batch takes effect. BlockedReason is set while the batch waits for
+	// another service to satisfy a constraint.
+	Compat        []CompatCheck `json:"compat,omitempty"`
+	BlockedReason string        `json:"blockedReason,omitempty"`
 	StartedAt     string        `json:"startedAt,omitempty"`
 	FinishedAt    string        `json:"finishedAt,omitempty"`
 }
@@ -60,6 +100,7 @@ type FailureSpec struct {
 
 type Release struct {
 	ID              string      `json:"id"`
+	ServiceID       string      `json:"serviceId"`
 	TargetVersion   string      `json:"targetVersion"`
 	Baseline        string      `json:"baselineVersion"`
 	Strategy        string      `json:"strategy"` // rolling
@@ -77,9 +118,13 @@ type Release struct {
 	ReviewAction   string `json:"reviewAction,omitempty"` // ""|continue|shrink|rollback
 	ReviewShrinkTo int    `json:"reviewShrinkTo,omitempty"`
 	ReviewAt       string `json:"reviewAt,omitempty"`
-	CreatedAt      string `json:"createdAt"`
-	FinishedAt     string `json:"finishedAt,omitempty"`
-	Message        string `json:"message,omitempty"`
+	// RollbackImpact explains, once the operator chooses rollback, whether
+	// dependent services stay compatible and which already-finished batches
+	// cannot be undone directly.
+	RollbackImpact []string `json:"rollbackImpact,omitempty"`
+	CreatedAt      string   `json:"createdAt"`
+	FinishedAt     string   `json:"finishedAt,omitempty"`
+	Message        string   `json:"message,omitempty"`
 }
 
 // Op is a virtual asynchronous operation with a scheduled due time. All
@@ -111,10 +156,12 @@ type Event struct {
 }
 
 type Snapshot struct {
-	Versions  []Version  `json:"versions"`
-	Instances []Instance `json:"instances"`
-	Releases  []Release  `json:"releases"`
-	Batches   []Batch    `json:"batches"`
-	Ops       []Op       `json:"ops"`
-	Events    []Event    `json:"events"`
+	Services    []Service    `json:"services"`
+	CompatRules []CompatRule `json:"compatRules"`
+	Versions    []Version    `json:"versions"`
+	Instances   []Instance   `json:"instances"`
+	Releases    []Release    `json:"releases"`
+	Batches     []Batch      `json:"batches"`
+	Ops         []Op         `json:"ops"`
+	Events      []Event      `json:"events"`
 }

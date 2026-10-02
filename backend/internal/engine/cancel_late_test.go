@@ -28,14 +28,15 @@ func TestCancelThenLateHealthResults(t *testing.T) {
 	if err := svc.Seed(t0); err != nil {
 		t.Fatal(err)
 	}
+	now := t0
+	upgradePayment(t, svc, &now)
 	rel, err := svc.CreateRelease(engine.CreateReleaseRequest{
 		TargetVersion: "v2.0.0", BatchSize: 2, Failure: store.FailureSpec{Mode: "none"},
-	}, t0)
+	}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	now := t0
 	// Run just past the update resolving so instances sit on v2, then cancel
 	// before health answers land.
 	for i := 0; i < 3; i++ {
@@ -81,6 +82,7 @@ func TestCancelThenLateHealthResults(t *testing.T) {
 		insts = append([]store.Instance(nil), tx.Instances()...)
 		remainOps = append([]store.Op(nil), tx.Ops()...)
 	})
+	batches = releaseBatchesOf(batches, rel.ID)
 	if r.Status != "cancelled" {
 		t.Fatalf("status = %s, want cancelled", r.Status)
 	}
@@ -92,7 +94,7 @@ func TestCancelThenLateHealthResults(t *testing.T) {
 	if len(remainOps) != 0 {
 		t.Fatalf("stranded ops: %d", len(remainOps))
 	}
-	for _, inst := range insts {
+	for _, inst := range orderInstances(insts) {
 		if inst.CurrentVersion != "v1.0.0" || inst.Health != "healthy" {
 			t.Fatalf("instance %s = %s/%s, want v1.0.0/healthy", inst.ID, inst.CurrentVersion, inst.Health)
 		}

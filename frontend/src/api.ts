@@ -1,9 +1,26 @@
 import type { FailureSpec, Snapshot } from "./types";
 
+// Older servers (or a fresh, untouched data directory) may serialize empty
+// collections as null. Normalize so the UI never iterates a null array —
+// that was the crash that trapped the page on the failure screen.
+export function normalizeSnapshot(s: Snapshot): Snapshot {
+  return {
+    ...s,
+    services: s.services ?? [],
+    compatRules: s.compatRules ?? [],
+    versions: s.versions ?? [],
+    instances: s.instances ?? [],
+    releases: s.releases ?? [],
+    batches: s.batches ?? [],
+    ops: s.ops ?? [],
+    events: s.events ?? [],
+  };
+}
+
 export async function fetchSnapshot(signal?: AbortSignal): Promise<Snapshot> {
   const res = await fetch("/api/state", { signal });
   if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  return res.json().then(normalizeSnapshot);
 }
 
 export async function createRelease(req: {
@@ -53,7 +70,7 @@ export async function initEnvironment(): Promise<Snapshot> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || "初始化演练环境失败");
   }
-  return res.json();
+  return res.json().then(normalizeSnapshot);
 }
 
 export async function pauseForReview(id: string): Promise<void> {
@@ -111,7 +128,7 @@ export function subscribe(onState: (s: Snapshot) => void): () => void {
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
-        onState(JSON.parse(ev.data));
+        onState(normalizeSnapshot(JSON.parse(ev.data)));
       } catch {
         es?.close();
         if (!stopped) pollTimer = window.setInterval(poll, 1000);

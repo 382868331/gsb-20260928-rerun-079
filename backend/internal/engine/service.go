@@ -27,26 +27,61 @@ func NewService(st *store.Store, c Config) *Service {
 
 func (s *Service) Engine() *Engine { return s.e }
 
-// Seed creates the initial local drill environment: two versions and six
-// virtual instances on the known-good baseline.
+// Seed creates the initial local drill environment: three virtual services
+// with compatibility constraints between them, each with its own baseline
+// and target versions and a set of virtual instances on the baseline.
 func (s *Service) Seed(now time.Time) error {
 	return s.st.Mutate(func(tx *store.Tx) error {
 		if len(tx.Versions()) > 0 || len(tx.Instances()) > 0 {
 			return nil
 		}
-		v1 := store.Version{ID: "v1.0.0", Name: "订单服务 1.0.0（基线）", ArtifactRef: "local://virtual/order-service:1.0.0", CreatedAt: nowStr(now)}
-		v2 := store.Version{ID: "v2.0.0", Name: "订单服务 2.0.0（演练目标）", ArtifactRef: "local://virtual/order-service:2.0.0", CreatedAt: nowStr(now)}
-		tx.SetVersions([]store.Version{v1, v2})
+		tx.SetServices([]store.Service{
+			{ID: "order", Name: "订单服务"},
+			{ID: "payment", Name: "支付服务"},
+			{ID: "notify", Name: "通知服务"},
+		})
+		tx.SetCompatRules([]store.CompatRule{
+			{ID: "rule-pay-order", DependentID: "payment", DependencyID: "order", Mode: "dependent_first",
+				Note: "支付服务依赖订单服务接口：订单服务批次生效前，支付服务必须先完成自身兼容更新"},
+			{ID: "rule-ntf-order", DependentID: "notify", DependencyID: "order", Mode: "pause",
+				Note: "订单服务升级期间，通知服务的发布必须暂停推进"},
+			{ID: "rule-ntf-pay", DependentID: "notify", DependencyID: "payment", Mode: "stay_old",
+				Note: "支付服务升级期间，通知服务必须保持旧版，不得同步升级"},
+		})
+		mkver := func(id, svc, name string) store.Version {
+			return store.Version{ID: id, ServiceID: svc, Name: name,
+				ArtifactRef: "local://virtual/" + svc + ":" + id, CreatedAt: nowStr(now)}
+		}
+		tx.SetVersions([]store.Version{
+			mkver("v1.0.0", "order", "订单服务 1.0.0（基线）"),
+			mkver("v2.0.0", "order", "订单服务 2.0.0（演练目标）"),
+			mkver("pay-v1.0.0", "payment", "支付服务 1.0.0（基线）"),
+			mkver("pay-v2.0.0", "payment", "支付服务 2.0.0（兼容订单新接口）"),
+			mkver("ntf-v1.0.0", "notify", "通知服务 1.0.0（基线）"),
+			mkver("ntf-v2.0.0", "notify", "通知服务 2.0.0（演练目标）"),
+		})
 		var insts []store.Instance
 		for i := 1; i <= 6; i++ {
 			insts = append(insts, store.Instance{
-				ID: fmt.Sprintf("inst-%d", i), Name: fmt.Sprintf("虚拟实例-%d", i),
-				CurrentVersion: v1.ID, DesiredVersion: v1.ID, Health: "healthy",
+				ID: fmt.Sprintf("inst-%d", i), ServiceID: "order", Name: fmt.Sprintf("订单实例-%d", i),
+				CurrentVersion: "v1.0.0", DesiredVersion: "v1.0.0", Health: "healthy",
+				UpdatedAt: nowStr(now),
+			})
+		}
+		for i := 1; i <= 2; i++ {
+			insts = append(insts, store.Instance{
+				ID: fmt.Sprintf("inst-p%d", i), ServiceID: "payment", Name: fmt.Sprintf("支付实例-%d", i),
+				CurrentVersion: "pay-v1.0.0", DesiredVersion: "pay-v1.0.0", Health: "healthy",
+				UpdatedAt: nowStr(now),
+			})
+			insts = append(insts, store.Instance{
+				ID: fmt.Sprintf("inst-n%d", i), ServiceID: "notify", Name: fmt.Sprintf("通知实例-%d", i),
+				CurrentVersion: "ntf-v1.0.0", DesiredVersion: "ntf-v1.0.0", Health: "healthy",
 				UpdatedAt: nowStr(now),
 			})
 		}
 		tx.SetInstances(insts)
-		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：6 个本地虚拟实例，基线版本 v1.0.0")
+		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：3 个虚拟服务（订单/支付/通知）共 10 台本地虚拟实例，含 3 条版本兼容约束")
 		return nil
 	})
 }
@@ -78,22 +113,28 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		}
 		for i := range tx.Releases() {
 			r := tx.Releases()[i]
-			if !isReleaseTerminal(r.Status) {
-				return errors.New("已有进行中的发布，演练平台同一时间只运行一个发布")
+			if r.ServiceID == target.ServiceID && !isReleaseTerminal(r.Status) {
+				return errors.New("该服务已有进行中的发布，同一服务同一时间只运行一个发布")
 			}
 		}
-		insts := tx.Instances()
+		var insts []store.Instance
+		for _, inst := range tx.Instances() {
+			if inst.ServiceID == target.ServiceID {
+				insts = append(insts, inst)
+			}
+		}
 		if len(insts) == 0 {
-			return errors.New("没有虚拟实例")
+			return errors.New("该服务没有虚拟实例")
 		}
 		baseline := insts[0].DesiredVersion
 		for _, inst := range insts {
 			if inst.CurrentVersion != insts[0].CurrentVersion {
-				return errors.New("实例当前版本不一致，请先统一基线后再发布")
+				return errors.New("该服务实例当前版本不一致，请先统一基线后再发布")
 			}
 		}
 		rel := store.Release{
-			ID: newID(tx, "rel"), TargetVersion: target.ID, Baseline: baseline,
+			ID: newID(tx, "rel"), ServiceID: target.ServiceID,
+			TargetVersion: target.ID, Baseline: baseline,
 			Strategy: req.Strategy, BatchSize: req.BatchSize, Status: "pending",
 			Failure: req.Failure, CreatedAt: nowStr(now),
 		}
@@ -123,8 +164,8 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		tx.SetReleases(append(tx.Releases(), rel))
 		tx.SetBatches(append(tx.Batches(), batches...))
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "info",
-			fmt.Sprintf("创建发布 %s：策略 %s，%d 个批次，每批 %d 台，目标版本 %s",
-				rel.ID, rel.Strategy, len(batches), rel.BatchSize, target.ID))
+			fmt.Sprintf("创建发布 %s（%s）：策略 %s，%d 个批次，每批 %d 台，目标版本 %s",
+				rel.ID, serviceName(tx, target.ServiceID), rel.Strategy, len(batches), rel.BatchSize, target.ID))
 		rc := rel
 		created = &rc
 		return nil
@@ -287,6 +328,7 @@ func (s *Service) ReviewRollback(releaseID string, now time.Time) error {
 		rel.ReviewAt = nowStr(now)
 		rel.ResumeRequested = true
 		rel.Message = "审查后决定回退：当前批次返回原版本，后续批次不再扩批"
+		recordRollbackImpact(tx, rel, now)
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "人工审查后选择回退；之后到达的健康结果仅留档，不改变决定")
 		return nil
 	})
@@ -317,6 +359,7 @@ func (s *Service) ResumeRollback(releaseID string, now time.Time) error {
 		rel.ReviewAction = "rollback"
 		rel.ReviewAt = nowStr(now)
 		rel.Message = "审查后决定继续回退"
+		recordRollbackImpact(tx, rel, now)
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "info", "审查完成，选择继续回退")
 		return nil
 	})
