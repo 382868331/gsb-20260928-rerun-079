@@ -71,6 +71,21 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", "发布已取消，未开始的批次不再扩批")
 			return true
 		}
+		// Zone capacity gate: the batch may only expand once it holds a
+		// queryable commitment. If another release already occupies the zone
+		// capacity this batch needs, the batch stays pending with a persisted
+		// waiting reason until the other commitment is released.
+		if ok, reason := capacityCheck(tx, rel, b); !ok {
+			if b.CapacityWaiting != reason {
+				b.CapacityWaiting = reason
+				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 等待区域容量："+reason)
+				return true
+			}
+			return false
+		}
+		if b.CapacityWaiting != "" {
+			b.CapacityWaiting = ""
+		}
 		// Compatibility + health basis is evaluated and persisted before the
 		// batch takes effect. A blocking constraint (a dependent must update
 		// first) freezes the release; a pause-mode constraint freezes it for
@@ -109,6 +124,7 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		for _, f := range pre.Findings {
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", "扩批前兼容检查："+f.Detail)
 		}
+		grantCapacity(tx, rel, b, now)
 		b.Phase = "updating"
 		b.StartedAt = nowStr(now)
 		for i := range b.Members {

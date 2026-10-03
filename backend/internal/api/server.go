@@ -39,6 +39,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/versions", s.handleCreateVersion)
 	mux.HandleFunc("POST /api/services/{id}/instances", s.handleAddInstance)
 	mux.HandleFunc("POST /api/rules", s.handleAddRule)
+	mux.HandleFunc("POST /api/zones/{id}/capacity", s.handleSetCapacity)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
 }
@@ -50,14 +51,17 @@ func (s *Server) snapshot() store.Snapshot {
 			// Non-nil slices: an empty drill must serialize as [], never
 			// null, so a first open on empty data renders the empty state
 			// instead of crashing the page on a null lookup.
-			Versions:  append([]store.Version{}, tx.Versions()...),
-			Services:  append([]store.Service{}, tx.Services()...),
-			Rules:     append([]store.CompatRule{}, tx.Rules()...),
-			Instances: append([]store.Instance{}, tx.Instances()...),
-			Releases:  append([]store.Release{}, tx.Releases()...),
-			Batches:   append([]store.Batch{}, tx.Batches()...),
-			Ops:       append([]store.Op{}, tx.Ops()...),
-			Events:    append([]store.Event{}, tx.Events()...),
+			Versions:     append([]store.Version{}, tx.Versions()...),
+			Services:     append([]store.Service{}, tx.Services()...),
+			Zones:        append([]store.Zone{}, tx.Zones()...),
+			Policies:     append([]store.CapacityPolicy{}, tx.Policies()...),
+			Rules:        append([]store.CompatRule{}, tx.Rules()...),
+			Instances:    append([]store.Instance{}, tx.Instances()...),
+			Releases:     append([]store.Release{}, tx.Releases()...),
+			Batches:      append([]store.Batch{}, tx.Batches()...),
+			Reservations: append([]store.CapacityReservation{}, tx.Reservations()...),
+			Ops:          append([]store.Op{}, tx.Ops()...),
+			Events:       append([]store.Event{}, tx.Events()...),
 		}
 	})
 	snap.Dependencies = append([]store.DependencyStatus{}, s.svc.DependencyStatuses()...)
@@ -267,6 +271,24 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcast()
 	writeJSON(w, out)
+}
+
+func (s *Server) handleSetCapacity(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MinAvailable map[string]int `json:"minAvailable"`
+		SharedMax    int            `json:"sharedMax"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	pol, err := s.svc.SetCapacityPolicy(r.PathValue("id"), req.MinAvailable, req.SharedMax, time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	writeJSON(w, pol)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

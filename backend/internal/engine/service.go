@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"releasectl/internal/store"
@@ -42,6 +43,17 @@ func (s *Service) Seed(now time.Time) error {
 			{ID: "svc-pay", Name: "支付服务"},
 			{ID: "svc-inventory", Name: "库存服务"},
 		})
+		tx.SetZones([]store.Zone{
+			{ID: "zone-a", Name: "区域 A（主）"},
+			{ID: "zone-b", Name: "区域 B（备）"},
+		})
+		tx.SetPolicies([]store.CapacityPolicy{
+			// Permissive defaults keep every previously available release
+			// working; the operator tightens limits on the zone capacity
+			// entry of the page.
+			{ZoneID: "zone-a", MinAvailable: map[string]int{}, SharedMax: 0},
+			{ZoneID: "zone-b", MinAvailable: map[string]int{}, SharedMax: 0},
+		})
 		tx.SetRules([]store.CompatRule{
 			{ID: "rule-pay-order-v1", ProviderID: "svc-pay", DependentID: "svc-order",
 				DependentVersion: "v1.0.0", MinProviderVersion: "v1.0.0", MaxProviderVersion: "v1.9.9",
@@ -58,15 +70,20 @@ func (s *Service) Seed(now time.Time) error {
 		})
 		var insts []store.Instance
 		for i := 1; i <= 6; i++ {
+			zoneID := "zone-a"
+			if i > 3 {
+				zoneID = "zone-b"
+			}
 			insts = append(insts, store.Instance{
 				ID: fmt.Sprintf("inst-%d", i), Name: fmt.Sprintf("虚拟实例-%d", i),
 				ServiceID:      "svc-order",
+				ZoneID:         zoneID,
 				CurrentVersion: v1.ID, DesiredVersion: v1.ID, Health: "healthy",
 				UpdatedAt: nowStr(now),
 			})
 		}
 		tx.SetInstances(insts)
-		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：3 个虚拟服务、6 个本地虚拟实例、4 条兼容约束，基线版本 v1.0.0")
+		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：3 个虚拟服务、2 个故障区域、6 个本地虚拟实例、4 条兼容约束，基线版本 v1.0.0")
 		return nil
 	})
 }
@@ -136,13 +153,10 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		if req.Strategy == "all_at_once" {
 			size = len(insts)
 		}
-		for start := 0; start < len(insts); start += size {
-			end := start + size
-			if end > len(insts) {
-				end = len(insts)
-			}
+		groups := planGroups(tx, insts, req.Strategy, size)
+		for _, group := range groups {
 			b := store.Batch{ID: newID(tx, "batch"), ReleaseID: rel.ID, Index: idx, Phase: "pending", TargetVersion: target.ID}
-			for _, inst := range insts[start:end] {
+			for _, inst := range group {
 				from := inst.CurrentVersion
 				b.Members = append(b.Members, store.MemberState{
 					InstanceID: inst.ID, FromVersion: from, ToVersion: target.ID,
@@ -163,6 +177,108 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		return nil
 	})
 	return created, err
+}
+
+// planGroups splits the target instances into batches. "zone_spread" batches
+// each zone separately and interleaves the zones, so one zone's failure or
+// capacity limit never blocks the other zone's batches; every other strategy
+// batches instances sequentially.
+func planGroups(tx *store.Tx, insts []store.Instance, strategy string, size int) [][]store.Instance {
+	if size < 1 {
+		size = 1
+	}
+	if strategy != "zone_spread" {
+		var groups [][]store.Instance
+		for start := 0; start < len(insts); start += size {
+			end := start + size
+			if end > len(insts) {
+				end = len(insts)
+			}
+			groups = append(groups, insts[start:end])
+		}
+		return groups
+	}
+	byZone := map[string][]store.Instance{}
+	var zones []string
+	for _, inst := range insts {
+		if _, ok := byZone[inst.ZoneID]; !ok {
+			zones = append(zones, inst.ZoneID)
+		}
+		byZone[inst.ZoneID] = append(byZone[inst.ZoneID], inst)
+	}
+	sort.Strings(zones)
+	var groups [][]store.Instance
+	for round := 0; ; round++ {
+		any := false
+		for _, z := range zones {
+			list := byZone[z]
+			start := round * size
+			if start >= len(list) {
+				continue
+			}
+			end := start + size
+			if end > len(list) {
+				end = len(list)
+			}
+			groups = append(groups, list[start:end])
+			any = true
+		}
+		if !any {
+			break
+		}
+	}
+	return groups
+}
+
+// SetCapacityPolicy is the zone capacity entry: it upserts the per-service
+// minimum available counts and the shared cross-service pool of one zone.
+func (s *Service) SetCapacityPolicy(zoneID string, minAvailable map[string]int, sharedMax int, now time.Time) (*store.CapacityPolicy, error) {
+	if sharedMax < 0 {
+		return nil, errors.New("共享容量不能为负数")
+	}
+	for svc, n := range minAvailable {
+		if n < 0 {
+			return nil, errors.New("服务 " + svc + " 的最低可用数量不能为负数")
+		}
+	}
+	var out *store.CapacityPolicy
+	err := s.st.Mutate(func(tx *store.Tx) error {
+		found := false
+		for _, z := range tx.Zones() {
+			if z.ID == zoneID {
+				found = true
+			}
+		}
+		if !found {
+			return errors.New("目标区域不存在")
+		}
+		clean := map[string]int{}
+		for svc, n := range minAvailable {
+			if n > 0 {
+				clean[svc] = n
+			}
+		}
+		policies := tx.Policies()
+		var pol *store.CapacityPolicy
+		for i := range policies {
+			if policies[i].ZoneID == zoneID {
+				policies[i].MinAvailable = clean
+				policies[i].SharedMax = sharedMax
+				pol = &policies[i]
+			}
+		}
+		if pol == nil {
+			policies = append(policies, store.CapacityPolicy{ZoneID: zoneID, MinAvailable: clean, SharedMax: sharedMax})
+			pol = &policies[len(policies)-1]
+		}
+		tx.SetPolicies(policies)
+		tx.AddEvent(nowStr(now), "", "", "", "info",
+			fmt.Sprintf("更新区域容量入口 %s：共享容量 %d，最低可用 %v", zoneName(tx, zoneID), sharedMax, clean))
+		pc := *pol
+		out = &pc
+		return nil
+	})
+	return out, err
 }
 
 func (s *Service) CancelRelease(releaseID string, now time.Time) error {
@@ -492,8 +608,23 @@ func (s *Service) AddInstance(serviceID string, now time.Time) (*store.Instance,
 				break
 			}
 		}
+		// Spread new instances across fault zones: join the zone where this
+		// service currently has the fewest instances.
+		zoneID := ""
+		zoneCount := map[string]int{}
+		for _, inst := range tx.Instances() {
+			if inst.ServiceID == serviceID {
+				zoneCount[inst.ZoneID]++
+			}
+		}
+		for _, z := range tx.Zones() {
+			if zoneID == "" || zoneCount[z.ID] < zoneCount[zoneID] {
+				zoneID = z.ID
+			}
+		}
 		inst := store.Instance{
 			ID: id, Name: svc.Name + "-" + id, ServiceID: serviceID,
+			ZoneID:         zoneID,
 			CurrentVersion: baseline, DesiredVersion: baseline,
 			Health: "healthy", UpdatedAt: nowStr(now),
 		}

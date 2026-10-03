@@ -11,17 +11,20 @@ import (
 
 // Store keeps versions, instances and release batches in separate files.
 type Store struct {
-	mu        sync.Mutex
-	dir       string
-	versions  []Version
-	services  []Service
-	rules     []CompatRule
-	instances []Instance
-	releases  []Release
-	batches   []Batch
-	ops       []Op
-	events    []Event
-	eventSeq  int64
+	mu           sync.Mutex
+	dir          string
+	versions     []Version
+	services     []Service
+	zones        []Zone
+	policies     []CapacityPolicy
+	rules        []CompatRule
+	instances    []Instance
+	releases     []Release
+	batches      []Batch
+	reservations []CapacityReservation
+	ops          []Op
+	events       []Event
+	eventSeq     int64
 }
 
 func Open(dir string) (*Store, error) {
@@ -42,6 +45,12 @@ func Open(dir string) (*Store, error) {
 	if err := must("services.json", &s.services); err != nil {
 		return nil, err
 	}
+	if err := must("zones.json", &s.zones); err != nil {
+		return nil, err
+	}
+	if err := must("capacity.json", &s.policies); err != nil {
+		return nil, err
+	}
 	if err := must("rules.json", &s.rules); err != nil {
 		return nil, err
 	}
@@ -52,6 +61,9 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	if err := must("batches.json", &s.batches); err != nil {
+		return nil, err
+	}
+	if err := must("reservations.json", &s.reservations); err != nil {
 		return nil, err
 	}
 	if err := must("ops.json", &s.ops); err != nil {
@@ -100,22 +112,28 @@ func (s *Store) View(fn func(tx *Tx)) {
 
 type Tx struct{ s *Store }
 
-func (tx *Tx) Versions() []Version   { return tx.s.versions }
-func (tx *Tx) Services() []Service   { return tx.s.services }
-func (tx *Tx) Rules() []CompatRule   { return tx.s.rules }
-func (tx *Tx) Instances() []Instance { return tx.s.instances }
-func (tx *Tx) Releases() []Release   { return tx.s.releases }
-func (tx *Tx) Batches() []Batch      { return tx.s.batches }
-func (tx *Tx) Ops() []Op             { return tx.s.ops }
-func (tx *Tx) Events() []Event       { return tx.s.events }
+func (tx *Tx) Versions() []Version                 { return tx.s.versions }
+func (tx *Tx) Services() []Service                 { return tx.s.services }
+func (tx *Tx) Zones() []Zone                       { return tx.s.zones }
+func (tx *Tx) Policies() []CapacityPolicy          { return tx.s.policies }
+func (tx *Tx) Rules() []CompatRule                 { return tx.s.rules }
+func (tx *Tx) Instances() []Instance               { return tx.s.instances }
+func (tx *Tx) Releases() []Release                 { return tx.s.releases }
+func (tx *Tx) Batches() []Batch                    { return tx.s.batches }
+func (tx *Tx) Reservations() []CapacityReservation { return tx.s.reservations }
+func (tx *Tx) Ops() []Op                           { return tx.s.ops }
+func (tx *Tx) Events() []Event                     { return tx.s.events }
 
-func (tx *Tx) SetVersions(v []Version)   { tx.s.versions = v }
-func (tx *Tx) SetServices(v []Service)   { tx.s.services = v }
-func (tx *Tx) SetRules(v []CompatRule)   { tx.s.rules = v }
-func (tx *Tx) SetInstances(v []Instance) { tx.s.instances = v }
-func (tx *Tx) SetReleases(v []Release)   { tx.s.releases = v }
-func (tx *Tx) SetBatches(v []Batch)      { tx.s.batches = v }
-func (tx *Tx) SetOps(v []Op)             { tx.s.ops = v }
+func (tx *Tx) SetVersions(v []Version)                 { tx.s.versions = v }
+func (tx *Tx) SetServices(v []Service)                 { tx.s.services = v }
+func (tx *Tx) SetZones(v []Zone)                       { tx.s.zones = v }
+func (tx *Tx) SetPolicies(v []CapacityPolicy)          { tx.s.policies = v }
+func (tx *Tx) SetRules(v []CompatRule)                 { tx.s.rules = v }
+func (tx *Tx) SetInstances(v []Instance)               { tx.s.instances = v }
+func (tx *Tx) SetReleases(v []Release)                 { tx.s.releases = v }
+func (tx *Tx) SetBatches(v []Batch)                    { tx.s.batches = v }
+func (tx *Tx) SetReservations(v []CapacityReservation) { tx.s.reservations = v }
+func (tx *Tx) SetOps(v []Op)                           { tx.s.ops = v }
 
 func (tx *Tx) AddEvent(at, releaseID, batchID, instanceID, level, msg string) {
 	tx.s.eventSeq++
@@ -132,10 +150,13 @@ func (s *Store) flush() error {
 	}{
 		{"versions.json", s.versions},
 		{"services.json", s.services},
+		{"zones.json", s.zones},
+		{"capacity.json", s.policies},
 		{"rules.json", s.rules},
 		{"instances.json", s.instances},
 		{"releases.json", s.releases},
 		{"batches.json", s.batches},
+		{"reservations.json", s.reservations},
 		{"ops.json", s.ops},
 		{"events.json", s.events},
 	}

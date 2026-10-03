@@ -31,6 +31,7 @@ func New(st *store.Store, c Config) *Engine { return &Engine{st: st, c: c} }
 func (e *Engine) Tick(now time.Time) error {
 	return e.st.Mutate(func(tx *store.Tx) error {
 		e.resolveDueOps(tx, now)
+		e.sweepReservations(tx, now)
 		for {
 			did, err := e.reconcile(tx, now)
 			if err != nil {

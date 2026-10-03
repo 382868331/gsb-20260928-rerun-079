@@ -9,6 +9,7 @@ export interface Instance {
   id: string;
   name: string;
   serviceId: string;
+  zoneId: string;
   currentVersion: string;
   desiredVersion: string;
   health: "healthy" | "unhealthy" | "unknown";
@@ -18,6 +19,32 @@ export interface Instance {
 export interface Service {
   id: string;
   name: string;
+}
+
+export interface Zone {
+  id: string;
+  name: string;
+}
+
+export interface CapacityPolicy {
+  zoneId: string;
+  minAvailable: Record<string, number>;
+  sharedMax: number;
+}
+
+export interface CapacityReservation {
+  id: string;
+  releaseId: string;
+  batchId: string;
+  zoneId: string;
+  serviceId: string;
+  members: string[];
+  state: "held" | "released";
+  basis: string[];
+  createdAt: string;
+  releasedAt?: string;
+  releaseReason?: string;
+  releaseBasis?: string[];
 }
 
 export interface CompatRule {
@@ -76,6 +103,7 @@ export interface Batch {
   targetVersion: string;
   members: MemberState[];
   preflight?: Preflight;
+  capacityWaiting?: string;
   startedAt?: string;
   finishedAt?: string;
 }
@@ -137,10 +165,13 @@ export interface Event {
 export interface Snapshot {
   versions: Version[];
   services: Service[];
+  zones: Zone[];
+  policies: CapacityPolicy[];
   rules: CompatRule[];
   instances: Instance[];
   releases: Release[];
   batches: Batch[];
+  reservations: CapacityReservation[];
   ops: Op[];
   events: Event[];
   dependencies: DependencyStatus[];

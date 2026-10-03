@@ -1,4 +1,4 @@
-import type { CompatRule, FailureSpec, Instance, Snapshot } from "./types";
+import type { CapacityPolicy, CompatRule, FailureSpec, Instance, Snapshot } from "./types";
 
 // normalizeSnapshot defends the render path against null collections: an
 // empty drill must render its empty state, never crash on a null lookup.
@@ -7,10 +7,13 @@ export function normalizeSnapshot(s: Snapshot): Snapshot {
     ...s,
     versions: s.versions ?? [],
     services: s.services ?? [],
+    zones: s.zones ?? [],
+    policies: s.policies ?? [],
     rules: s.rules ?? [],
     instances: s.instances ?? [],
     releases: s.releases ?? [],
     batches: s.batches ?? [],
+    reservations: s.reservations ?? [],
     ops: s.ops ?? [],
     events: s.events ?? [],
     dependencies: s.dependencies ?? [],
@@ -102,6 +105,22 @@ export async function pauseForReview(id: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || "暂停发布失败");
   }
+}
+
+export async function setCapacityPolicy(
+  zoneId: string,
+  req: { minAvailable: Record<string, number>; sharedMax: number }
+): Promise<CapacityPolicy> {
+  const res = await fetch(`/api/zones/${zoneId}/capacity`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "保存区域容量失败");
+  }
+  return res.json();
 }
 
 export async function reviewContinue(id: string): Promise<void> {
