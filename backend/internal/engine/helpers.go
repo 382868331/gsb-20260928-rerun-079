@@ -129,6 +129,14 @@ func compareVersions(a, b string) int {
 // proposed target version. Findings are deterministic (sorted by rule id) so
 // the persisted preflight basis is stable.
 func evaluateCompat(tx *store.Tx, serviceID, targetVersion string) []store.CompatFinding {
+	return evaluateCompatWith(tx, serviceID, targetVersion, nil)
+}
+
+// evaluateCompatWith is evaluateCompat with an optional simulated version
+// override (serviceID -> version, "" means mixed/migrating). Plan
+// comparison uses it to explain what would block a hypothetical step
+// without touching any real state.
+func evaluateCompatWith(tx *store.Tx, serviceID, targetVersion string, sim map[string]string) []store.CompatFinding {
 	var rules []store.CompatRule
 	for _, r := range tx.Rules() {
 		if r.ProviderID == serviceID {
@@ -154,6 +162,10 @@ func evaluateCompat(tx *store.Tx, serviceID, targetVersion string) []store.Compa
 			if inst.CurrentVersion != dv {
 				uniform = false
 			}
+		}
+		if sim != nil {
+			dv = sim[r.DependentID]
+			uniform = dv != ""
 		}
 		if !uniform {
 			f.Compatible = true
@@ -297,6 +309,20 @@ func rebuildPendingBatches(tx *store.Tx, rel *store.Release, size int, now time.
 			if !started[m.InstanceID] {
 				remaining = append(remaining, m.InstanceID)
 			}
+		}
+	}
+	// Keep the release's ordering strategy when re-chunking, so a
+	// zone-spread release stays zone-spread after a shrink.
+	if rel.Strategy == "zone_spread" {
+		var insts []store.Instance
+		for _, id := range remaining {
+			if inst := findInstance(tx, id); inst != nil {
+				insts = append(insts, *inst)
+			}
+		}
+		remaining = remaining[:0]
+		for _, inst := range orderForStrategy(tx, insts, rel.Strategy) {
+			remaining = append(remaining, inst.ID)
 		}
 	}
 	kept := tx.Batches()[:0]

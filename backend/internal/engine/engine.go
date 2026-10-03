@@ -143,6 +143,9 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 		if rel := findRelease(tx, op.ReleaseID); rel != nil {
 			healthy = !healthShouldFail(*rel, *b, *m)
 		}
+		if inst != nil && zoneIsFailed(tx, inst.ZoneID) {
+			healthy = false
+		}
 		verdict := "healthy"
 		if !healthy {
 			verdict = "unhealthy"
@@ -165,6 +168,11 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 	healthy := true
 	if rel := findRelease(tx, op.ReleaseID); rel != nil {
 		healthy = !healthShouldFail(*rel, *b, *m)
+	}
+	// A failed zone makes every observation there unhealthy: the instance
+	// cannot serve, regardless of what the virtual probe would say.
+	if inst != nil && zoneIsFailed(tx, inst.ZoneID) {
+		healthy = false
 	}
 	m.LastResolvedKey = key
 	if healthy {

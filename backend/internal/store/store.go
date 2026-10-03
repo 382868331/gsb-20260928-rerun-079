@@ -16,6 +16,9 @@ type Store struct {
 	versions  []Version
 	services  []Service
 	rules     []CompatRule
+	zones     []Zone
+	policies  []CapacityPolicy
+	pools     []SharedPool
 	instances []Instance
 	releases  []Release
 	batches   []Batch
@@ -43,6 +46,15 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	if err := must("rules.json", &s.rules); err != nil {
+		return nil, err
+	}
+	if err := must("zones.json", &s.zones); err != nil {
+		return nil, err
+	}
+	if err := must("policies.json", &s.policies); err != nil {
+		return nil, err
+	}
+	if err := must("pools.json", &s.pools); err != nil {
 		return nil, err
 	}
 	if err := must("instances.json", &s.instances); err != nil {
@@ -103,6 +115,9 @@ type Tx struct{ s *Store }
 func (tx *Tx) Versions() []Version   { return tx.s.versions }
 func (tx *Tx) Services() []Service   { return tx.s.services }
 func (tx *Tx) Rules() []CompatRule   { return tx.s.rules }
+func (tx *Tx) Zones() []Zone         { return tx.s.zones }
+func (tx *Tx) Policies() []CapacityPolicy { return tx.s.policies }
+func (tx *Tx) Pools() []SharedPool        { return tx.s.pools }
 func (tx *Tx) Instances() []Instance { return tx.s.instances }
 func (tx *Tx) Releases() []Release   { return tx.s.releases }
 func (tx *Tx) Batches() []Batch      { return tx.s.batches }
@@ -112,6 +127,9 @@ func (tx *Tx) Events() []Event       { return tx.s.events }
 func (tx *Tx) SetVersions(v []Version)   { tx.s.versions = v }
 func (tx *Tx) SetServices(v []Service)   { tx.s.services = v }
 func (tx *Tx) SetRules(v []CompatRule)   { tx.s.rules = v }
+func (tx *Tx) SetZones(v []Zone)              { tx.s.zones = v }
+func (tx *Tx) SetPolicies(v []CapacityPolicy) { tx.s.policies = v }
+func (tx *Tx) SetPools(v []SharedPool)        { tx.s.pools = v }
 func (tx *Tx) SetInstances(v []Instance) { tx.s.instances = v }
 func (tx *Tx) SetReleases(v []Release)   { tx.s.releases = v }
 func (tx *Tx) SetBatches(v []Batch)      { tx.s.batches = v }
@@ -133,6 +151,9 @@ func (s *Store) flush() error {
 		{"versions.json", s.versions},
 		{"services.json", s.services},
 		{"rules.json", s.rules},
+		{"zones.json", s.zones},
+		{"policies.json", s.policies},
+		{"pools.json", s.pools},
 		{"instances.json", s.instances},
 		{"releases.json", s.releases},
 		{"batches.json", s.batches},

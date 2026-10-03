@@ -3,6 +3,7 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"releasectl/internal/store"
@@ -56,17 +57,26 @@ func (s *Service) Seed(now time.Time) error {
 				DependentVersion: "v1.0.0", MinProviderVersion: "v1.0.0", MaxProviderVersion: "v2.9.9",
 				Mode: "stay_old", Note: "支付服务保持旧版仍兼容订单服务 v2"},
 		})
+		tx.SetZones([]store.Zone{
+			{ID: "zone-east", Name: "华东区（故障区域）"},
+			{ID: "zone-west", Name: "华西区（故障区域）"},
+		})
 		var insts []store.Instance
 		for i := 1; i <= 6; i++ {
+			zoneID := "zone-east"
+			if i > 3 {
+				zoneID = "zone-west"
+			}
 			insts = append(insts, store.Instance{
 				ID: fmt.Sprintf("inst-%d", i), Name: fmt.Sprintf("虚拟实例-%d", i),
 				ServiceID:      "svc-order",
+				ZoneID:         zoneID,
 				CurrentVersion: v1.ID, DesiredVersion: v1.ID, Health: "healthy",
 				UpdatedAt: nowStr(now),
 			})
 		}
 		tx.SetInstances(insts)
-		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：3 个虚拟服务、6 个本地虚拟实例、4 条兼容约束，基线版本 v1.0.0")
+		tx.AddEvent(nowStr(now), "", "", "", "info", "演练环境就绪：3 个虚拟服务、2 个故障区域、6 个本地虚拟实例、4 条兼容约束，基线版本 v1.0.0；容量下限与共享容量池需在页面中指定")
 		return nil
 	})
 }
@@ -130,28 +140,29 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 			Strategy: req.Strategy, BatchSize: req.BatchSize, Status: "pending",
 			Failure: req.Failure, CreatedAt: nowStr(now),
 		}
-		var batches []store.Batch
-		idx := 0
-		size := req.BatchSize
-		if req.Strategy == "all_at_once" {
-			size = len(insts)
+		ordered := orderForStrategy(tx, insts, rel.Strategy)
+		groups := planBatches(ordered, rel.Strategy, req.BatchSize)
+		// Capacity pre-check: refuse a plan whose batches could never fit
+		// the agreed floors, even with zero concurrent occupancy. The
+		// error names the exact zone/pool condition that blocks the plan.
+		if err := validatePlanCapacity(tx, serviceID, groups); err != nil {
+			return err
 		}
-		for start := 0; start < len(insts); start += size {
-			end := start + size
-			if end > len(insts) {
-				end = len(insts)
-			}
+		var batches []store.Batch
+		for idx, group := range groups {
 			b := store.Batch{ID: newID(tx, "batch"), ReleaseID: rel.ID, Index: idx, Phase: "pending", TargetVersion: target.ID}
-			for _, inst := range insts[start:end] {
-				from := inst.CurrentVersion
+			for _, instID := range group {
+				from := baseline
+				if inst := findInstance(tx, instID); inst != nil {
+					from = inst.CurrentVersion
+				}
 				b.Members = append(b.Members, store.MemberState{
-					InstanceID: inst.ID, FromVersion: from, ToVersion: target.ID,
+					InstanceID: instID, FromVersion: from, ToVersion: target.ID,
 					UpdateState: "pending", HealthState: "pending",
 				})
 			}
 			batches = append(batches, b)
 			rel.BatchIDs = append(rel.BatchIDs, b.ID)
-			idx++
 		}
 		tx.SetReleases(append(tx.Releases(), rel))
 		tx.SetBatches(append(tx.Batches(), batches...))
@@ -484,6 +495,24 @@ func (s *Service) AddInstance(serviceID string, now time.Time) (*store.Instance,
 		if baseline == "" {
 			return errors.New("尚无可用版本，请先创建版本")
 		}
+		// Place the new instance into the zone where this service currently
+		// has the fewest instances, so repeated adds spread across zones.
+		zoneID := ""
+		if len(tx.Zones()) > 0 {
+			count := map[string]int{}
+			for _, inst := range tx.Instances() {
+				if inst.ServiceID == serviceID {
+					count[inst.ZoneID]++
+				}
+			}
+			best := -1
+			for _, z := range tx.Zones() {
+				if best == -1 || count[z.ID] < best {
+					best = count[z.ID]
+					zoneID = z.ID
+				}
+			}
+		}
 		id := ""
 		for {
 			candidate := newID(tx, "inst")
@@ -494,11 +523,12 @@ func (s *Service) AddInstance(serviceID string, now time.Time) (*store.Instance,
 		}
 		inst := store.Instance{
 			ID: id, Name: svc.Name + "-" + id, ServiceID: serviceID,
+			ZoneID:         zoneID,
 			CurrentVersion: baseline, DesiredVersion: baseline,
 			Health: "healthy", UpdatedAt: nowStr(now),
 		}
 		tx.SetInstances(append(tx.Instances(), inst))
-		tx.AddEvent(nowStr(now), "", "", inst.ID, "info", "新增虚拟实例 "+inst.ID+"（"+svc.Name+"，基线 "+baseline+"）")
+		tx.AddEvent(nowStr(now), "", "", inst.ID, "info", "新增虚拟实例 "+inst.ID+"（"+svc.Name+" @ "+zoneName(tx, zoneID)+"，基线 "+baseline+"）")
 		ic := inst
 		out = &ic
 		return nil
@@ -555,10 +585,204 @@ func (s *Service) DependencyStatuses() []store.DependencyStatus {
 					st.Blocked = true
 				}
 			}
+			if rel.CapacityBlocked && rel.CapacityNote != "" {
+				st.Pending = append(st.Pending, "容量："+rel.CapacityNote)
+				st.Blocked = true
+			}
 			if len(st.Pending) > 0 {
 				out = append(out, st)
 			}
 		}
+		// Mutual-wait detection: two in-flight releases each blocked on the
+		// other side (a dependency on the other's service, or capacity the
+		// other still holds). Mark both so the drill operator sees that
+		// only an explicit decision (cancel one side, or clear the
+		// condition) can move the drill on.
+		for i := 0; i < len(out); i++ {
+			for j := i + 1; j < len(out); j++ {
+				a, b := out[i], out[j]
+				if waitsOn(tx, a, b.ServiceID, b.ReleaseID) && waitsOn(tx, b, a.ServiceID, a.ReleaseID) {
+					out[i].Mutual = true
+					out[j].Mutual = true
+				}
+			}
+		}
 	})
 	return out
+}
+
+// waitsOn reports whether release a is currently blocked by something
+// belonging to the other side: an unmet update_first rule whose dependent
+// is otherServiceID, or a capacity note that names the other release.
+func waitsOn(tx *store.Tx, a store.DependencyStatus, otherServiceID, otherReleaseID string) bool {
+	if rel := findRelease(tx, a.ReleaseID); rel != nil && rel.CapacityBlocked && otherReleaseID != "" &&
+		len(rel.CapacityNote) > 0 && strings.Contains(rel.CapacityNote, otherReleaseID) {
+		return true
+	}
+	for _, f := range evaluateCompat(tx, a.ServiceID, targetVersionOf(tx, a.ReleaseID)) {
+		if !f.Compatible && f.Blocking && f.DependentID == otherServiceID {
+			return true
+		}
+	}
+	return false
+}
+
+func targetVersionOf(tx *store.Tx, releaseID string) string {
+	if rel := findRelease(tx, releaseID); rel != nil {
+		return rel.TargetVersion
+	}
+	return ""
+}
+
+// AddPolicy registers the minimum available capacity one service must keep
+// in one zone at all times.
+func (s *Service) AddPolicy(p store.CapacityPolicy, now time.Time) (*store.CapacityPolicy, error) {
+	if p.ServiceID == "" || p.ZoneID == "" {
+		return nil, errors.New("容量下限必须指定服务与故障区域")
+	}
+	if p.MinAvailable < 0 {
+		return nil, errors.New("最低可用实例数不能为负")
+	}
+	var out *store.CapacityPolicy
+	err := s.st.Mutate(func(tx *store.Tx) error {
+		if findService(tx, p.ServiceID) == nil {
+			return errors.New("服务不存在")
+		}
+		if zoneByID(tx, p.ZoneID) == nil {
+			return errors.New("故障区域不存在")
+		}
+		for _, existing := range tx.Policies() {
+			if existing.ServiceID == p.ServiceID && existing.ZoneID == p.ZoneID {
+				return errors.New("该服务在此区域已有容量下限，请先调整既有约定")
+			}
+		}
+		p.ID = newID(tx, "policy")
+		tx.SetPolicies(append(tx.Policies(), p))
+		tx.AddEvent(nowStr(now), "", "", "", "info",
+			fmt.Sprintf("新增容量下限 %s：%s @ %s 至少保留 %d 台可用实例",
+				p.ID, serviceName(tx, p.ServiceID), zoneName(tx, p.ZoneID), p.MinAvailable))
+		pc := p
+		out = &pc
+		return nil
+	})
+	return out, err
+}
+
+// AddPool registers a shared capacity floor several services depend on.
+func (s *Service) AddPool(pl store.SharedPool, now time.Time) (*store.SharedPool, error) {
+	if pl.ZoneID == "" {
+		return nil, errors.New("共享容量池必须指定故障区域")
+	}
+	if len(pl.ServiceIDs) < 2 {
+		return nil, errors.New("共享容量池至少包含两个服务")
+	}
+	if pl.MinAvailable < 0 {
+		return nil, errors.New("最低可用实例数不能为负")
+	}
+	if pl.Name == "" {
+		pl.Name = "共享容量池"
+	}
+	var out *store.SharedPool
+	err := s.st.Mutate(func(tx *store.Tx) error {
+		if zoneByID(tx, pl.ZoneID) == nil {
+			return errors.New("故障区域不存在")
+		}
+		seen := map[string]bool{}
+		for _, sid := range pl.ServiceIDs {
+			if findService(tx, sid) == nil {
+				return errors.New("共享容量池涉及的服务不存在：" + sid)
+			}
+			if seen[sid] {
+				return errors.New("共享容量池包含重复服务：" + sid)
+			}
+			seen[sid] = true
+		}
+		pl.ID = newID(tx, "pool")
+		tx.SetPools(append(tx.Pools(), pl))
+		names := make([]string, 0, len(pl.ServiceIDs))
+		for _, sid := range pl.ServiceIDs {
+			names = append(names, serviceName(tx, sid))
+		}
+		tx.AddEvent(nowStr(now), "", "", "", "info",
+			fmt.Sprintf("新增共享容量池 %s：%s @ %s 合计至少保留 %d 台可用实例",
+				pl.Name, joinComma(names), zoneName(tx, pl.ZoneID), pl.MinAvailable))
+		pc := pl
+		out = &pc
+		return nil
+	})
+	return out, err
+}
+
+// FailZone injects a zone failure: every virtual instance in the zone
+// becomes unavailable. In-flight health observations there resolve
+// unhealthy, and capacity floors immediately see the lost capacity.
+func (s *Service) FailZone(zoneID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		z := zoneByID(tx, zoneID)
+		if z == nil {
+			return errors.New("故障区域不存在")
+		}
+		if z.Failed {
+			return nil
+		}
+		zones := append([]store.Zone(nil), tx.Zones()...)
+		for i := range zones {
+			if zones[i].ID == zoneID {
+				zones[i].Failed = true
+				zones[i].FailedAt = nowStr(now)
+			}
+		}
+		tx.SetZones(zones)
+		affected := 0
+		insts := append([]store.Instance(nil), tx.Instances()...)
+		for i := range insts {
+			if insts[i].ZoneID == zoneID {
+				insts[i].Health = "unhealthy"
+				insts[i].UpdatedAt = nowStr(now)
+				affected++
+			}
+		}
+		tx.SetInstances(insts)
+		tx.AddEvent(nowStr(now), "", "", "", "error",
+			fmt.Sprintf("故障区域失效：%s，%d 台虚拟实例不可用；进行中的健康观察将判定不健康，容量下限按失效后余量计算", zoneName(tx, zoneID), affected))
+		return nil
+	})
+}
+
+// RecoverZone ends a zone failure. Instances not currently occupied by an
+// in-flight batch become healthy again; occupied ones keep following their
+// own update/rollback ops.
+func (s *Service) RecoverZone(zoneID string, now time.Time) error {
+	return s.st.Mutate(func(tx *store.Tx) error {
+		z := zoneByID(tx, zoneID)
+		if z == nil {
+			return errors.New("故障区域不存在")
+		}
+		if !z.Failed {
+			return nil
+		}
+		zones := append([]store.Zone(nil), tx.Zones()...)
+		for i := range zones {
+			if zones[i].ID == zoneID {
+				zones[i].Failed = false
+				zones[i].FailedAt = ""
+			}
+		}
+		tx.SetZones(zones)
+		occ := occupancyMap(tx)
+		insts := append([]store.Instance(nil), tx.Instances()...)
+		for i := range insts {
+			if insts[i].ZoneID != zoneID {
+				continue
+			}
+			if _, held := occ[insts[i].ID]; held {
+				continue
+			}
+			insts[i].Health = "healthy"
+			insts[i].UpdatedAt = nowStr(now)
+		}
+		tx.SetInstances(insts)
+		tx.AddEvent(nowStr(now), "", "", "", "info", "故障区域恢复："+zoneName(tx, zoneID)+"，未被占用的实例恢复可用")
+		return nil
+	})
 }

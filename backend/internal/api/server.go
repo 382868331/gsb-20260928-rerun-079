@@ -39,6 +39,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/versions", s.handleCreateVersion)
 	mux.HandleFunc("POST /api/services/{id}/instances", s.handleAddInstance)
 	mux.HandleFunc("POST /api/rules", s.handleAddRule)
+	mux.HandleFunc("POST /api/policies", s.handleAddPolicy)
+	mux.HandleFunc("POST /api/pools", s.handleAddPool)
+	mux.HandleFunc("POST /api/zones/{id}/fail", s.handleFailZone)
+	mux.HandleFunc("POST /api/zones/{id}/recover", s.handleRecoverZone)
+	mux.HandleFunc("POST /api/plans/compare", s.handleComparePlans)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
 }
@@ -53,11 +58,15 @@ func (s *Server) snapshot() store.Snapshot {
 			Versions:  append([]store.Version{}, tx.Versions()...),
 			Services:  append([]store.Service{}, tx.Services()...),
 			Rules:     append([]store.CompatRule{}, tx.Rules()...),
+			Zones:     append([]store.Zone{}, tx.Zones()...),
+			Policies:  append([]store.CapacityPolicy{}, tx.Policies()...),
+			Pools:     append([]store.SharedPool{}, tx.Pools()...),
 			Instances: append([]store.Instance{}, tx.Instances()...),
 			Releases:  append([]store.Release{}, tx.Releases()...),
 			Batches:   append([]store.Batch{}, tx.Batches()...),
 			Ops:       append([]store.Op{}, tx.Ops()...),
 			Events:    append([]store.Event{}, tx.Events()...),
+			Capacity:  engine.BuildCapacityView(tx),
 		}
 	})
 	snap.Dependencies = append([]store.DependencyStatus{}, s.svc.DependencyStatuses()...)
@@ -267,6 +276,63 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcast()
 	writeJSON(w, out)
+}
+
+func (s *Server) handleAddPolicy(w http.ResponseWriter, r *http.Request) {
+	var p store.CapacityPolicy
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, err := s.svc.AddPolicy(p, time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	writeJSON(w, out)
+}
+
+func (s *Server) handleAddPool(w http.ResponseWriter, r *http.Request) {
+	var pl store.SharedPool
+	if err := json.NewDecoder(r.Body).Decode(&pl); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, err := s.svc.AddPool(pl, time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	writeJSON(w, out)
+}
+
+func (s *Server) handleFailZone(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.FailZone(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleRecoverZone(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.RecoverZone(r.PathValue("id"), time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleComparePlans(w http.ResponseWriter, r *http.Request) {
+	var req engine.CompareRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"scenarios": s.svc.ComparePlans(req, time.Now())})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

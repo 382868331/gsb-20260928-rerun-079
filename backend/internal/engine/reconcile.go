@@ -75,14 +75,19 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		// batch takes effect. A blocking constraint (a dependent must update
 		// first) freezes the release; a pause-mode constraint freezes it for
 		// review exactly once, until a human accepts the evidence.
+		// Capacity is evaluated together with them: the persisted preflight
+		// shows version compatibility, health basis and the capacity this
+		// batch will occupy in one place.
+		capOK, capBasis, capBlockers := checkBatchCapacity(tx, rel, b)
 		pre := &store.Preflight{
-			CheckedAt:   nowStr(now),
-			Findings:    evaluateCompat(tx, rel.ServiceID, rel.TargetVersion),
-			HealthBasis: healthBasis(tx, b),
+			CheckedAt:     nowStr(now),
+			Findings:      evaluateCompat(tx, rel.ServiceID, rel.TargetVersion),
+			HealthBasis:   healthBasis(tx, b),
+			CapacityBasis: capBasis,
 		}
 		pre.Compatible = !hasBlockingFinding(pre.Findings) && !hasPausingFinding(pre.Findings)
-		b.Preflight = pre
 		if hasBlockingFinding(pre.Findings) {
+			b.Preflight = pre
 			rel.Status = "paused"
 			rel.PauseRequested = true
 			rel.CompatBlocked = true
@@ -96,6 +101,7 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			return true
 		}
 		if hasPausingFinding(pre.Findings) && rel.ReviewAction == "" {
+			b.Preflight = pre
 			rel.Status = "paused"
 			rel.PauseRequested = true
 			rel.Message = "兼容审查暂停：依赖者兼容性需人工确认后才能扩批"
@@ -106,6 +112,34 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			}
 			return true
 		}
+		// Capacity admission: two individually safe batches may still
+		// overlap, so the check runs inside the same transaction that
+		// starts the batch — the second one always sees the first one's
+		// commitments and must wait instead of breaching a floor.
+		if !capOK {
+			note := ""
+			for i, bl := range capBlockers {
+				if i > 0 {
+					note += "；"
+				}
+				note += bl
+			}
+			if !rel.CapacityBlocked || rel.CapacityNote != note {
+				rel.CapacityBlocked = true
+				rel.CapacityNote = note
+				rel.Message = "容量不足，等待其他批次释放承诺：" + note
+				b.Preflight = pre
+				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 暂不扩批："+note)
+				return true
+			}
+			return false
+		}
+		if rel.CapacityBlocked {
+			rel.CapacityBlocked = false
+			rel.CapacityNote = ""
+			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", "容量承诺已释放，"+batchLabel(b)+" 继续扩批")
+		}
+		b.Preflight = pre
 		for _, f := range pre.Findings {
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", "扩批前兼容检查："+f.Detail)
 		}
