@@ -129,6 +129,14 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 	key := op.ReleaseID + ":" + op.BatchID + ":" + op.ResolveVersion
 	terminal := m.HealthState == "healthy" || m.HealthState == "unhealthy" || m.HealthState == "stale"
 	inst := findInstance(tx, op.InstanceID)
+	// A failed zone makes every health answer inside it negative, whether
+	// the answer arrives on time or late.
+	zoneFailed := false
+	if inst != nil {
+		if z := zoneByID(tx, inst.ZoneID); z != nil && z.Failed {
+			zoneFailed = true
+		}
+	}
 	// Late-result guard: the answer only counts for the exact
 	// release+batch+version that asked. Once the instance moved away (rollback
 	// or a later release to a newer version) the result is recorded stale and
@@ -142,6 +150,9 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 		healthy := true
 		if rel := findRelease(tx, op.ReleaseID); rel != nil {
 			healthy = !healthShouldFail(*rel, *b, *m)
+		}
+		if zoneFailed {
+			healthy = false
 		}
 		verdict := "healthy"
 		if !healthy {
@@ -165,6 +176,9 @@ func (e *Engine) resolveHealth(tx *store.Tx, op store.Op, now time.Time) {
 	healthy := true
 	if rel := findRelease(tx, op.ReleaseID); rel != nil {
 		healthy = !healthShouldFail(*rel, *b, *m)
+	}
+	if zoneFailed {
+		healthy = false
 	}
 	m.LastResolvedKey = key
 	if healthy {

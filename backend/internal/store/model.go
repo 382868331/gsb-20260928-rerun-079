@@ -16,6 +16,38 @@ type Service struct {
 	Name string `json:"name"`
 }
 
+// Zone is a failure zone (故障区域). Every virtual instance belongs to
+// exactly one zone; capacity limits are evaluated per zone.
+type Zone struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// MinAvailable maps service ID to the minimum number of instances of
+	// that service that must remain available (not occupied by any batch)
+	// inside this zone. Missing entry means no per-service limit.
+	MinAvailable map[string]int `json:"minAvailable"`
+	// SharedCapacity is the maximum number of instances across all
+	// services in this zone that may be occupied at the same time.
+	// Zero means no shared limit.
+	SharedCapacity int  `json:"sharedCapacity"`
+	Failed         bool `json:"failed"`
+}
+
+// CapacityGrant is a queryable capacity commitment (容量承诺) held by one
+// batch of one release inside one zone. InstanceIDs shrinks as members
+// settle into a verified real state (healthy on the new version or rolled
+// back to the old one); the grant is released only when it is empty.
+type CapacityGrant struct {
+	ID          string   `json:"id"`
+	ReleaseID   string   `json:"releaseId"`
+	BatchID     string   `json:"batchId"`
+	ZoneID      string   `json:"zoneId"`
+	InstanceIDs []string `json:"instanceIds"`
+	State       string   `json:"state"` // held|released
+	AcquiredAt  string   `json:"acquiredAt"`
+	ReleasedAt  string   `json:"releasedAt,omitempty"`
+	ReleaseWhy  string   `json:"releaseWhy,omitempty"`
+}
+
 // CompatRule describes which provider versions a dependent service can run
 // against. When the provider service is released to a target outside
 // [MinProviderVersion, MaxProviderVersion] while the dependent sits on
@@ -55,6 +87,9 @@ type Preflight struct {
 	Compatible  bool            `json:"compatible"`
 	Findings    []CompatFinding `json:"findings"`
 	HealthBasis []string        `json:"healthBasis"`
+	// CapacityBasis records, per zone, which instances this batch will
+	// occupy and the available/shared numbers the decision was based on.
+	CapacityBasis []string `json:"capacityBasis"`
 }
 
 // Instance is a local virtual instance. DesiredVersion is what the fleet
@@ -63,6 +98,7 @@ type Instance struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	ServiceID      string `json:"serviceId"`
+	ZoneID         string `json:"zoneId"`
 	CurrentVersion string `json:"currentVersion"`
 	DesiredVersion string `json:"desiredVersion"`
 	Health         string `json:"health"` // healthy | unhealthy | unknown
@@ -96,8 +132,13 @@ type Batch struct {
 	TargetVersion string        `json:"targetVersion"`
 	Members       []MemberState `json:"members"`
 	Preflight     *Preflight    `json:"preflight,omitempty"`
-	StartedAt     string        `json:"startedAt,omitempty"`
-	FinishedAt    string        `json:"finishedAt,omitempty"`
+	// CapacityWait is the persisted reason this batch cannot acquire zone
+	// capacity yet (which release holds the conflicting commitment). It
+	// survives a reopen and clears once the batch acquires its grants.
+	CapacityWait string   `json:"capacityWait,omitempty"`
+	GrantIDs     []string `json:"grantIds,omitempty"`
+	StartedAt    string   `json:"startedAt,omitempty"`
+	FinishedAt   string   `json:"finishedAt,omitempty"`
 }
 
 // FailureSpec injects failures for a drill without deploying anything.
@@ -169,14 +210,16 @@ type Event struct {
 }
 
 type Snapshot struct {
-	Versions  []Version    `json:"versions"`
-	Services  []Service    `json:"services"`
-	Rules     []CompatRule `json:"rules"`
-	Instances []Instance   `json:"instances"`
-	Releases  []Release    `json:"releases"`
-	Batches   []Batch      `json:"batches"`
-	Ops       []Op         `json:"ops"`
-	Events    []Event      `json:"events"`
+	Versions  []Version       `json:"versions"`
+	Services  []Service       `json:"services"`
+	Zones     []Zone          `json:"zones"`
+	Rules     []CompatRule    `json:"rules"`
+	Instances []Instance      `json:"instances"`
+	Releases  []Release       `json:"releases"`
+	Batches   []Batch         `json:"batches"`
+	Grants    []CapacityGrant `json:"grants"`
+	Ops       []Op            `json:"ops"`
+	Events    []Event         `json:"events"`
 	// Dependencies lists, per in-flight release, the compatibility
 	// constraints that are not yet satisfied (unfinished dependencies).
 	Dependencies []DependencyStatus `json:"dependencies"`

@@ -9,6 +9,7 @@ export interface Instance {
   id: string;
   name: string;
   serviceId: string;
+  zoneId: string;
   currentVersion: string;
   desiredVersion: string;
   health: "healthy" | "unhealthy" | "unknown";
@@ -18,6 +19,26 @@ export interface Instance {
 export interface Service {
   id: string;
   name: string;
+}
+
+export interface Zone {
+  id: string;
+  name: string;
+  minAvailable: Record<string, number>;
+  sharedCapacity: number;
+  failed: boolean;
+}
+
+export interface CapacityGrant {
+  id: string;
+  releaseId: string;
+  batchId: string;
+  zoneId: string;
+  instanceIds: string[];
+  state: "held" | "released";
+  acquiredAt: string;
+  releasedAt?: string;
+  releaseWhy?: string;
 }
 
 export interface CompatRule {
@@ -46,6 +67,7 @@ export interface Preflight {
   compatible: boolean;
   findings: CompatFinding[];
   healthBasis: string[];
+  capacityBasis: string[];
 }
 
 export interface DependencyStatus {
@@ -76,6 +98,8 @@ export interface Batch {
   targetVersion: string;
   members: MemberState[];
   preflight?: Preflight;
+  capacityWait?: string;
+  grantIds?: string[];
   startedAt?: string;
   finishedAt?: string;
 }
@@ -137,11 +161,27 @@ export interface Event {
 export interface Snapshot {
   versions: Version[];
   services: Service[];
+  zones: Zone[];
   rules: CompatRule[];
   instances: Instance[];
   releases: Release[];
   batches: Batch[];
+  grants: CapacityGrant[];
   ops: Op[];
   events: Event[];
   dependencies: DependencyStatus[];
+}
+
+export interface PlanBatch {
+  index: number;
+  instanceIds: string[];
+  zoneNames: string[];
+  capacityOk: boolean;
+  reason?: string;
+}
+
+export interface Plan {
+  strategy: string;
+  name: string;
+  batches: PlanBatch[];
 }

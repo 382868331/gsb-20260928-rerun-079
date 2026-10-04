@@ -39,6 +39,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/versions", s.handleCreateVersion)
 	mux.HandleFunc("POST /api/services/{id}/instances", s.handleAddInstance)
 	mux.HandleFunc("POST /api/rules", s.handleAddRule)
+	mux.HandleFunc("POST /api/zones", s.handleCreateZone)
+	mux.HandleFunc("PUT /api/zones/{id}/capacity", s.handleSetZoneCapacity)
+	mux.HandleFunc("POST /api/zones/{id}/failure", s.handleSetZoneFailure)
+	mux.HandleFunc("POST /api/plans/compare", s.handleComparePlans)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
 }
@@ -52,10 +56,12 @@ func (s *Server) snapshot() store.Snapshot {
 			// instead of crashing the page on a null lookup.
 			Versions:  append([]store.Version{}, tx.Versions()...),
 			Services:  append([]store.Service{}, tx.Services()...),
+			Zones:     append([]store.Zone{}, tx.Zones()...),
 			Rules:     append([]store.CompatRule{}, tx.Rules()...),
 			Instances: append([]store.Instance{}, tx.Instances()...),
 			Releases:  append([]store.Release{}, tx.Releases()...),
 			Batches:   append([]store.Batch{}, tx.Batches()...),
+			Grants:    append([]store.CapacityGrant{}, tx.Grants()...),
 			Ops:       append([]store.Op{}, tx.Ops()...),
 			Events:    append([]store.Event{}, tx.Events()...),
 		}
@@ -267,6 +273,78 @@ func (s *Server) handleAddRule(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcast()
 	writeJSON(w, out)
+}
+
+func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	z, err := s.svc.CreateZone(req.ID, req.Name, time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	writeJSON(w, z)
+}
+
+func (s *Server) handleSetZoneCapacity(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MinAvailable   map[string]int `json:"minAvailable"`
+		SharedCapacity int            `json:"sharedCapacity"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.svc.SetZoneCapacity(r.PathValue("id"), req.MinAvailable, req.SharedCapacity, time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleSetZoneFailure(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Failed bool `json:"failed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.svc.SetZoneFailure(r.PathValue("id"), req.Failed, time.Now()); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.broadcast()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleComparePlans(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ServiceID string `json:"serviceId"`
+		BatchSize int    `json:"batchSize"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.ServiceID == "" {
+		writeErr(w, http.StatusBadRequest, "必须指定目标服务")
+		return
+	}
+	plans, err := s.svc.ComparePlans(req.ServiceID, req.BatchSize)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"plans": plans})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

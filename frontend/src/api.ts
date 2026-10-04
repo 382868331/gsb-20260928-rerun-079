@@ -1,4 +1,4 @@
-import type { CompatRule, FailureSpec, Instance, Snapshot } from "./types";
+import type { CompatRule, FailureSpec, Instance, Plan, Snapshot } from "./types";
 
 // normalizeSnapshot defends the render path against null collections: an
 // empty drill must render its empty state, never crash on a null lookup.
@@ -7,10 +7,12 @@ export function normalizeSnapshot(s: Snapshot): Snapshot {
     ...s,
     versions: s.versions ?? [],
     services: s.services ?? [],
+    zones: s.zones ?? [],
     rules: s.rules ?? [],
     instances: s.instances ?? [],
     releases: s.releases ?? [],
     batches: s.batches ?? [],
+    grants: s.grants ?? [],
     ops: s.ops ?? [],
     events: s.events ?? [],
     dependencies: s.dependencies ?? [],
@@ -130,6 +132,48 @@ export async function reviewRollback(id: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || "审查回退失败");
   }
+}
+export async function setZoneCapacity(
+
+  zoneId: string,
+  minAvailable: Record<string, number>,
+  sharedCapacity: number
+): Promise<void> {
+  const res = await fetch("/api/zones/" + zoneId + "/capacity", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ minAvailable, sharedCapacity }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "保存区域容量配置失败");
+  }
+}
+
+export async function setZoneFailure(zoneId: string, failed: boolean): Promise<void> {
+  const res = await fetch("/api/zones/" + zoneId + "/failure", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ failed }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "区域故障操作失败");
+  }
+}
+
+export async function comparePlans(serviceId: string, batchSize: number): Promise<Plan[]> {
+  const res = await fetch("/api/plans/compare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ serviceId, batchSize }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "比较推进方案失败");
+  }
+  const data = await res.json();
+  return data.plans ?? [];
 }
 
 // Subscribe to live state over SSE. Falls back to polling if the stream

@@ -8,6 +8,12 @@ import (
 
 // reconcile performs one pass of state transitions driven by member states.
 func (e *Engine) reconcile(tx *store.Tx, now time.Time) (bool, error) {
+	// Capacity commitments are released strictly by real instance state
+	// before any batch decision, so a freed slot can be re-acquired in the
+	// same tick by a waiting batch.
+	if e.releaseSettledGrants(tx, now) {
+		return true, nil
+	}
 	for i := range tx.Releases() {
 		rel := &tx.Releases()[i]
 		if isReleaseTerminal(rel.Status) {
@@ -80,6 +86,7 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			Findings:    evaluateCompat(tx, rel.ServiceID, rel.TargetVersion),
 			HealthBasis: healthBasis(tx, b),
 		}
+		pre.CapacityBasis = capacityBasis(tx, b)
 		pre.Compatible = !hasBlockingFinding(pre.Findings) && !hasPausingFinding(pre.Findings)
 		b.Preflight = pre
 		if hasBlockingFinding(pre.Findings) {
@@ -108,6 +115,18 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		}
 		for _, f := range pre.Findings {
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", "扩批前兼容检查："+f.Detail)
+		}
+		// Zone capacity review: the batch may only expand after acquiring a
+		// queryable capacity commitment for every zone it touches. Two
+		// individually safe plans can conflict in parallel; the later one
+		// waits here with a persisted, reopenable reason.
+		if reason, ok := e.tryAcquireCapacity(tx, rel, b, now); !ok {
+			if b.CapacityWait != reason {
+				b.CapacityWait = reason
+				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 等待区域容量："+reason)
+				return true
+			}
+			return false
 		}
 		b.Phase = "updating"
 		b.StartedAt = nowStr(now)
@@ -184,10 +203,11 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 			// release never breaks other services on health evidence alone.
 			findings := evaluateCompat(tx, rel.ServiceID, rel.TargetVersion)
 			b.Preflight = &store.Preflight{
-				CheckedAt:   nowStr(now),
-				Compatible:  !hasBlockingFinding(findings),
-				Findings:    findings,
-				HealthBasis: healthBasis(tx, b),
+				CheckedAt:     nowStr(now),
+				Compatible:    !hasBlockingFinding(findings),
+				Findings:      findings,
+				HealthBasis:   healthBasis(tx, b),
+				CapacityBasis: capacityBasis(tx, b),
 			}
 			if hasBlockingFinding(findings) {
 				rel.Status = "paused"

@@ -163,3 +163,26 @@ button.warning:disabled { opacity: .5; cursor: not-allowed; }
 .add-rule summary { cursor: pointer; color: var(--accent); font-size: 13px; }
 .rule-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 12px; margin-top: 8px; }
 .rule-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+
+.zone { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.zone-failed { border-color: var(--err); }
+.zone-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; }
+.zone-head .hint-inline { color: var(--muted); font-size: 12px; }
+.zone-cap { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.zone-cap label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.zone-cap input { width: 72px; }
+.grant-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; font-size: 12.5px; color: var(--warn); }
+
+.capwait { display: flex; align-items: center; gap: 6px; background: rgba(232,163,61,.12); border: 1px solid rgba(232,163,61,.5); border-radius: 8px; padding: 7px 10px; font-size: 12.5px; color: var(--warn); margin: 8px 0; }
+
+.grants { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 12.5px; }
+.grants ul { margin: 6px 0 0; padding-left: 18px; }
+.grants li.held { color: var(--warn); }
+.grants li.released { color: var(--ok); }
+
+.plans { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-size: 13px; }
+.plans h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13.5px; }
+.plan { margin: 8px 0; }
+.plan ul { margin: 4px 0 0; padding-left: 18px; }
+.plan li.ok { color: var(--ok); }
+.plan li.bad { color: var(--err); }

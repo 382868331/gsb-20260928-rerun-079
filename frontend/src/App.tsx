@@ -1,10 +1,11 @@
 import { Component, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, Ban, Boxes, FileClock, GitBranch, Link2, ListOrdered, OctagonAlert, Pause, Play, Plus, RotateCcw, Shrink, SkipForward } from "lucide-react";
+import { Activity, Ban, Boxes, FileClock, GitBranch, Link2, ListOrdered, MapPin, OctagonAlert, Pause, Play, Plus, RotateCcw, Scale, Shrink, SkipForward } from "lucide-react";
 import {
   addInstance, addRule, createRelease, cancelRelease, finishDrill, subscribe, initEnvironment,
   pauseForReview, reviewContinue, reviewShrink, reviewRollback,
+  setZoneCapacity, setZoneFailure, comparePlans,
 } from "./api";
-import type { Batch, Snapshot } from "./types";
+import type { Batch, Plan, Snapshot } from "./types";
 
 const phaseLabel: Record<string, string> = {
   pending: "等待",
@@ -77,6 +78,7 @@ export function App() {
   const [strategy, setStrategy] = useState("rolling");
   const [pauseOnFailure, setPauseOnFailure] = useState(true);
   const [serviceId, setServiceId] = useState("");
+  const [plans, setPlans] = useState<Plan[] | null>(null);
 
   useEffect(
     () =>
@@ -164,11 +166,12 @@ export function App() {
         <div className="card">
           <h2><Activity size={18} /> 虚拟实例（{snap.instances.length}）</h2>
           <table>
-            <thead><tr><th>实例</th><th>当前版本</th><th>期望归宿</th><th>健康</th></tr></thead>
+            <thead><tr><th>实例</th><th>故障区域</th><th>当前版本</th><th>期望归宿</th><th>健康</th></tr></thead>
             <tbody>
               {snap.instances.map((i) => (
                 <tr key={i.id}>
                   <td>{i.name}</td>
+                  <td>{snap.zones.find((z) => z.id === i.zoneId)?.name ?? "—"}</td>
                   <td><code>{i.currentVersion}</code></td>
                   <td><code>{i.desiredVersion}</code></td>
                   <td><span className={"pill h-" + i.health}>{i.health === "healthy" ? "健康" : i.health === "unhealthy" ? "不健康" : "未知"}</span></td>
@@ -196,6 +199,7 @@ export function App() {
           <label>发布策略
             <select value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={!!activeRelease}>
               <option value="rolling">分批滚动（按批次逐步扩批）</option>
+              <option value="zone_spread">跨区域分散（每批均匀分布到各故障区域）</option>
               <option value="all_at_once">全量一次性（全部实例同批）</option>
             </select>
           </label>
@@ -229,6 +233,16 @@ export function App() {
           </label>
           <div className="actions">
             <button className="primary" onClick={submit} disabled={!!activeRelease || envEmpty}>开始按批次发布</button>
+            <button
+              disabled={!!activeRelease || envEmpty}
+              onClick={() =>
+                comparePlans(serviceId || snap.services[0]?.id || "", Number(batchSize))
+                  .then(setPlans)
+                  .catch((e) => setError(e.message))
+              }
+            >
+              <Scale size={15} /> 比较推进方案
+            </button>
             {activeRelease && !activeRelease.pauseRequested && activeRelease.status !== "paused" && (
               <button onClick={() => pauseForReview(activeRelease.id).catch((e) => setError(e.message))}>
                 <Pause size={15} /> 暂停审查
@@ -241,6 +255,28 @@ export function App() {
             )}
           </div>
           {error && <p className="error">{error}</p>}
+          {plans && (
+            <div className="plans">
+              <h3><Scale size={15} /> 推进方案比较（每批 {batchSize} 台）</h3>
+              {plans.map((p) => (
+                <div key={p.strategy} className="plan">
+                  <strong>{p.name}</strong>
+                  <ul>
+                    {p.batches.map((b) => (
+                      <li key={b.index} className={b.capacityOk ? "ok" : "bad"}>
+                        第 {b.index + 1} 批：{b.instanceIds.join("、")}（{b.zoneNames.join("、") || "无区域"}）
+                        {b.capacityOk ? " — 容量可承诺" : " — 容量不足：" + b.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+              <p className="hint">比较仅作评估，不会占用容量；点击“开始按批次发布”才按所选策略真正创建发布。</p>
+              <div className="actions">
+                <button onClick={() => setPlans(null)}>收起比较</button>
+              </div>
+            </div>
+          )}
           {envEmpty && (
             <div className="init-box">
               <p className="hint">当前是完全空的演练环境（无版本、无服务、无实例、无发布记录）。先初始化环境，再创建演练发布；发布记录只会在你点击“开始”后生成。</p>
@@ -255,6 +291,7 @@ export function App() {
 
       {!envEmpty && (
         <section className="grid">
+          <ZonesCard snap={snap} onError={setError} />
           <ServicesCard snap={snap} onError={setError} />
           <RulesCard snap={snap} onError={setError} />
         </section>
@@ -285,6 +322,7 @@ export function App() {
           {shownRelease.rollbackNote && (
             <p className="hint">回退评估：{shownRelease.rollbackNote}</p>
           )}
+          <CapacityGrants snap={snap} releaseId={shownRelease.id} />
           {shownRelease.status === "paused" && (
             <PausedReview snap={snap} release={shownRelease} onError={setError} />
           )}
@@ -412,6 +450,97 @@ const ruleModeLabel: Record<string, string> = {
   stay_old: "依赖者可保持旧版",
   pause: "推进前需人工审查",
 };
+
+// ZonesCard is the zone capacity entry point: per-service minimum available
+// counts and the cross-service shared capacity are configured here, zone
+// faults are injected here, and live occupancy (held commitments) is shown
+// next to the real available numbers.
+function ZonesCard({ snap, onError }: { snap: Snapshot; onError: (m: string) => void }) {
+  const [drafts, setDrafts] = useState<Record<string, { min: Record<string, number>; shared: number }>>({});
+  const draftFor = (z: Snapshot["zones"][number]) =>
+    drafts[z.id] ?? { min: { ...z.minAvailable }, shared: z.sharedCapacity };
+  const setDraft = (zid: string, d: { min: Record<string, number>; shared: number }) =>
+    setDrafts((prev) => ({ ...prev, [zid]: d }));
+  return (
+    <div className="card">
+      <h2><MapPin size={18} /> 故障区域与容量（{snap.zones.length}）</h2>
+      {snap.zones.map((z) => {
+        const insts = snap.instances.filter((i) => i.zoneId === z.id);
+        const held = snap.grants.filter((g) => g.zoneId === z.id && g.state === "held");
+        const occupied = new Set(held.flatMap((g) => g.instanceIds));
+        const d = draftFor(z);
+        return (
+          <div key={z.id} className={"zone" + (z.failed ? " zone-failed" : "")}>
+            <div className="zone-head">
+              <strong>{z.name}</strong>
+              <span className={"pill " + (z.failed ? "h-unhealthy" : "h-healthy")}>{z.failed ? "区域故障中" : "正常"}</span>
+              <span className="hint-inline">{insts.length} 台实例 · 被占用 {occupied.size} 台 · 可用 {insts.length - occupied.size} 台</span>
+              <button
+                className={z.failed ? "" : "danger"}
+                onClick={() => setZoneFailure(z.id, !z.failed).catch((e) => onError(e.message))}
+              >
+                {z.failed ? "恢复区域" : "注入区域故障"}
+              </button>
+            </div>
+            <div className="zone-cap">
+              {snap.services.map((s) => (
+                <label key={s.id}>{s.name}最低可用
+                  <input
+                    type="number"
+                    min={0}
+                    value={d.min[s.id] ?? 0}
+                    onChange={(e) =>
+                      setDraft(z.id, { ...d, min: { ...d.min, [s.id]: Number(e.target.value) } })
+                    }
+                  />
+                </label>
+              ))}
+              <label>跨服务共享容量（0 为不限）
+                <input
+                  type="number"
+                  min={0}
+                  value={d.shared}
+                  onChange={(e) => setDraft(z.id, { ...d, shared: Number(e.target.value) })}
+                />
+              </label>
+              <button
+                className="primary"
+                onClick={() =>
+                  setZoneCapacity(z.id, d.min, d.shared)
+                    .then(() => setDrafts((prev) => { const n = { ...prev }; delete n[z.id]; return n; }))
+                    .catch((e) => onError(e.message))
+                }
+              >
+                保存容量配置
+              </button>
+            </div>
+            {held.length > 0 && (
+              <ul className="grant-list">
+                {held.map((g) => (
+                  <li key={g.id}>
+                    承诺 {g.id}：发布 {g.releaseId} 占用 {g.instanceIds.join("、")}（{timeShort(g.acquiredAt)} 取得）
+                  </li>
+                ))}
+              </ul>
+            )}
+            {snap.grants.some((g) => g.zoneId === z.id && g.state === "released") && (
+              <p className="hint">
+                最近释放：
+                {snap.grants
+                  .filter((g) => g.zoneId === z.id && g.state === "released")
+                  .slice(-2)
+                  .map((g) => g.id + "（" + timeShort(g.releasedAt) + "，" + (g.releaseWhy ?? "") + "）")
+                  .join("；")}
+              </p>
+            )}
+          </div>
+        );
+      })}
+      {snap.zones.length === 0 && <p className="empty">暂无故障区域：初始化环境后自动创建两个区域。</p>}
+      <p className="hint">容量承诺按实例真实状态释放：健康通过或确认回到原版本后才恢复可用数。</p>
+    </div>
+  );
+}
 
 function ServicesCard({ snap, onError }: { snap: Snapshot; onError: (m: string) => void }) {
   return (
@@ -571,6 +700,9 @@ function BatchView({ batch, ops }: { batch: Batch; ops: Snapshot["ops"] }) {
         <span className={"pill b-" + batch.phase}>{phaseLabel[batch.phase] ?? batch.phase}</span>
         <span className="when">{timeShort(batch.startedAt)} → {timeShort(batch.finishedAt)}</span>
       </div>
+      {batch.capacityWait && (
+        <p className="capwait"><OctagonAlert size={14} /> 等待区域容量：{batch.capacityWait}（状态已持久化，重开页面仍可查看）</p>
+      )}
       {batch.preflight && (
         <div className="preflight">
           <strong>生效前依据（{timeShort(batch.preflight.checkedAt)} 评估）：</strong>
@@ -583,6 +715,9 @@ function BatchView({ batch, ops }: { batch: Batch; ops: Snapshot["ops"] }) {
             {batch.preflight.findings.length === 0 && <li className="ok">无跨服务约束涉及本批次</li>}
             {batch.preflight.healthBasis.map((h, i) => (
               <li key={"h" + i} className="ok">健康依据：{h}</li>
+            ))}
+            {(batch.preflight.capacityBasis ?? []).map((c, i) => (
+              <li key={"c" + i} className="ok">容量依据：{c}</li>
             ))}
           </ul>
         </div>
@@ -621,6 +756,28 @@ function BatchView({ batch, ops }: { batch: Batch; ops: Snapshot["ops"] }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// CapacityGrants lists every capacity commitment of the shown release with
+// the real instance evidence behind each acquire and release.
+function CapacityGrants({ snap, releaseId }: { snap: Snapshot; releaseId: string }) {
+  const grants = snap.grants.filter((g) => g.releaseId === releaseId);
+  if (grants.length === 0) return null;
+  const zoneName = (id: string) => snap.zones.find((z) => z.id === id)?.name ?? id;
+  return (
+    <div className="grants">
+      <strong>区域容量承诺（可查询）：</strong>
+      <ul>
+        {grants.map((g) => (
+          <li key={g.id} className={g.state === "held" ? "held" : "released"}>
+            {zoneName(g.zoneId)}：{g.state === "held" ? "持有中" : "已释放"} — 占用 {g.instanceIds.join("、") || "无"}
+            （{timeShort(g.acquiredAt)} 取得
+            {g.state === "released" && <>，{timeShort(g.releasedAt)} 释放：{g.releaseWhy}</>}）
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
