@@ -186,3 +186,44 @@ button.warning:disabled { opacity: .5; cursor: not-allowed; }
 .plan ul { margin: 4px 0 0; padding-left: 18px; }
 .plan li.ok { color: var(--ok); }
 .plan li.bad { color: var(--err); }
+
+.compare .cmp-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: flex-end;
+  margin: 8px 0;
+}
+.compare .cmp-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+.compare .cmp-releases { margin-top: 8px; }
+.compare .cmp-releases tr.selected { background: #1e2a3a; }
+.cmp-view { margin-top: 12px; }
+.cmp-section { margin-top: 14px; }
+.cmp-section h3 { margin: 0 0 6px; font-size: 14px; }
+.cmp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px 12px;
+}
+.cmp-grid.single { grid-template-columns: 1fr; }
+.cmp-col-head {
+  font-weight: 600;
+  font-size: 13px;
+  padding: 4px 8px;
+  background: #16202e;
+  border-radius: 6px;
+}
+.cmp-row { display: contents; }
+.cmp-row .cmp-cell {
+  padding: 4px 8px;
+  font-size: 13px;
+  border-radius: 6px;
+  background: #101824;
+}
+.cmp-row.diff .cmp-cell { background: #2b2338; outline: 1px solid #6b4fa1; }
+.cmp-row.same .cmp-cell { opacity: 0.75; }

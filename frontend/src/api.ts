@@ -1,4 +1,4 @@
-import type { CompatRule, FailureSpec, Instance, Plan, Snapshot } from "./types";
+import type { CapacityComparison, CompatRule, FailureSpec, Instance, Plan, Snapshot } from "./types";
 
 // normalizeSnapshot defends the render path against null collections: an
 // empty drill must render its empty state, never crash on a null lookup.
@@ -174,6 +174,20 @@ export async function comparePlans(serviceId: string, batchSize: number): Promis
   }
   const data = await res.json();
   return data.plans ?? [];
+}
+
+// compareCapacity fetches the read-only cross-release capacity comparison.
+// It is a pure GET: it never acquires commitments, releases instances or
+// changes release state.
+export async function compareCapacity(a: string, b?: string): Promise<CapacityComparison> {
+  const params = new URLSearchParams({ a });
+  if (b) params.set("b", b);
+  const res = await fetch("/api/capacity/compare?" + params.toString());
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "加载容量对比失败");
+  }
+  return res.json();
 }
 
 // Subscribe to live state over SSE. Falls back to polling if the stream

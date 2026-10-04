@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/zones/{id}/capacity", s.handleSetZoneCapacity)
 	mux.HandleFunc("POST /api/zones/{id}/failure", s.handleSetZoneFailure)
 	mux.HandleFunc("POST /api/plans/compare", s.handleComparePlans)
+	mux.HandleFunc("GET /api/capacity/compare", s.handleCompareCapacity)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
 }
@@ -345,6 +347,25 @@ func (s *Server) handleComparePlans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"plans": plans})
+}
+
+// handleCompareCapacity serves the cross-release capacity comparison. It is
+// a pure GET over the persisted snapshot: it never acquires commitments,
+// never releases instances and never mutates release state.
+func (s *Server) handleCompareCapacity(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	ids := make([]string, 0, 2)
+	for _, key := range []string{"a", "b"} {
+		if v := strings.TrimSpace(q.Get(key)); v != "" {
+			ids = append(ids, v)
+		}
+	}
+	cmp, err := s.svc.CompareReleaseCapacity(ids, time.Now())
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, cmp)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

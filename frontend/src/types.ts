@@ -185,3 +185,64 @@ export interface Plan {
   name: string;
   batches: PlanBatch[];
 }
+
+export interface CapacityInstanceView {
+  instanceId: string;
+  fromVersion: string;
+  toVersion: string;
+  released: boolean;
+  releasedAt?: string;
+  releaseOrder?: number;
+  releaseWhy?: string;
+}
+
+export interface CapacityGrantView {
+  id: string;
+  batchId: string;
+  batchIndex: number;
+  zoneId: string;
+  zoneName: string;
+  state: string;
+  acquiredAt: string;
+  releasedAt?: string;
+  releaseWhy?: string;
+  instances: CapacityInstanceView[];
+}
+
+export interface CapacityWaitView {
+  batchId: string;
+  batchIndex: number;
+  waiting: boolean;
+  seconds: number;
+  reason: string;
+  since: string;
+  until?: string;
+}
+
+export interface CapacityPolicyView {
+  zoneId: string;
+  zoneName: string;
+  hasMin: boolean;
+  minAvailable: number;
+  sharedCapacity: number;
+  basis: string[];
+}
+
+export interface ReleaseCapacityView {
+  releaseId: string;
+  serviceId: string;
+  serviceName: string;
+  targetVersion: string;
+  baseline: string;
+  status: string;
+  createdAt: string;
+  finishedAt?: string;
+  grants: CapacityGrantView[];
+  waits: CapacityWaitView[];
+  policies: CapacityPolicyView[];
+}
+
+export interface CapacityComparison {
+  generatedAt: string;
+  releases: ReleaseCapacityView[];
+}
