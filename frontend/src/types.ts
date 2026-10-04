@@ -185,3 +185,70 @@ export interface Plan {
   name: string;
   batches: PlanBatch[];
 }
+
+export interface GrantWindow {
+  grantId: string;
+  batchId: string;
+  batchIndex: number;
+  zoneId: string;
+  zoneName: string;
+  state: string;
+  instances: string[];
+  acquiredAt: string;
+  releasedAt?: string;
+  releaseWhy?: string;
+  waitSeconds: number;
+  occupySeconds: number;
+}
+
+export interface InstanceReturn {
+  order: number;
+  instanceId: string;
+  zoneName: string;
+  at: string;
+  why: string;
+}
+
+export interface InstanceOccupancy {
+  instanceId: string;
+  fromVersion: string;
+  toVersion: string;
+  batchIndex: number;
+  zoneName: string;
+}
+
+export interface ZonePolicy {
+  zoneId: string;
+  zoneName: string;
+  minAvailable: number;
+  sharedCapacity: number;
+}
+
+export interface WaitingBatch {
+  batchId: string;
+  batchIndex: number;
+  reason: string;
+  since: string;
+}
+
+export interface ReleaseCapacity {
+  releaseId: string;
+  serviceId: string;
+  serviceName: string;
+  targetVersion: string;
+  baseline: string;
+  status: string;
+  createdAt: string;
+  finishedAt?: string;
+  grants: GrantWindow[];
+  returns: InstanceReturn[];
+  occupancy: InstanceOccupancy[];
+  policies: ZonePolicy[];
+  waiting: WaitingBatch[];
+  totalWaitSeconds: number;
+}
+
+export interface CapacityCompareResult {
+  generatedAt: string;
+  releases: ReleaseCapacity[];
+}

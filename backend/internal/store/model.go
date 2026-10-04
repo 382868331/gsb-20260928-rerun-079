@@ -135,10 +135,14 @@ type Batch struct {
 	// CapacityWait is the persisted reason this batch cannot acquire zone
 	// capacity yet (which release holds the conflicting commitment). It
 	// survives a reopen and clears once the batch acquires its grants.
-	CapacityWait string   `json:"capacityWait,omitempty"`
-	GrantIDs     []string `json:"grantIds,omitempty"`
-	StartedAt    string   `json:"startedAt,omitempty"`
-	FinishedAt   string   `json:"finishedAt,omitempty"`
+	CapacityWait string `json:"capacityWait,omitempty"`
+	// CapacityWaitSince records when the batch first started waiting for
+	// zone capacity. It is kept after the grants are acquired so the wait
+	// duration stays queryable for cross-release capacity comparison.
+	CapacityWaitSince string   `json:"capacityWaitSince,omitempty"`
+	GrantIDs          []string `json:"grantIds,omitempty"`
+	StartedAt         string   `json:"startedAt,omitempty"`
+	FinishedAt        string   `json:"finishedAt,omitempty"`
 }
 
 // FailureSpec injects failures for a drill without deploying anything.

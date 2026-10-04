@@ -122,6 +122,9 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		// waits here with a persisted, reopenable reason.
 		if reason, ok := e.tryAcquireCapacity(tx, rel, b, now); !ok {
 			if b.CapacityWait != reason {
+				if b.CapacityWait == "" {
+					b.CapacityWaitSince = nowStr(now)
+				}
 				b.CapacityWait = reason
 				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 等待区域容量："+reason)
 				return true

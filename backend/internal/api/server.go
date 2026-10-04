@@ -43,6 +43,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/zones/{id}/capacity", s.handleSetZoneCapacity)
 	mux.HandleFunc("POST /api/zones/{id}/failure", s.handleSetZoneFailure)
 	mux.HandleFunc("POST /api/plans/compare", s.handleComparePlans)
+	mux.HandleFunc("GET /api/capacity/compare", s.handleCapacityCompare)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
 }
@@ -345,6 +346,26 @@ func (s *Server) handleComparePlans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"plans": plans})
+}
+
+// handleCapacityCompare serves the cross-release capacity comparison. It is
+// strictly read-only: it only reads persisted records inside a View, so
+// viewing history or exporting can never acquire commitments, release
+// instances, or change any release state.
+func (s *Server) handleCapacityCompare(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f := engine.CapacityCompareFilters{
+		ZoneID:    q.Get("zoneId"),
+		ServiceID: q.Get("serviceId"),
+		Status:    q.Get("status"),
+		From:      q.Get("from"),
+		To:        q.Get("to"),
+	}
+	var res engine.CapacityCompareResult
+	s.st.View(func(tx *store.Tx) {
+		res = engine.BuildCapacityCompare(tx, f, time.Now())
+	})
+	writeJSON(w, res)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -1,4 +1,4 @@
-import type { CompatRule, FailureSpec, Instance, Plan, Snapshot } from "./types";
+import type { CapacityCompareResult, CompatRule, FailureSpec, Instance, Plan, Snapshot } from "./types";
 
 // normalizeSnapshot defends the render path against null collections: an
 // empty drill must render its empty state, never crash on a null lookup.
@@ -174,6 +174,32 @@ export async function comparePlans(serviceId: string, batchSize: number): Promis
   }
   const data = await res.json();
   return data.plans ?? [];
+}
+
+export interface CapacityCompareFilters {
+  zoneId: string;
+  serviceId: string;
+  status: string;
+  from: string;
+  to: string;
+}
+
+// Read-only history query: the server only reads persisted records, so
+// viewing or exporting can never acquire commitments, release instances,
+// or change any release state.
+export async function fetchCapacityCompare(f: CapacityCompareFilters): Promise<CapacityCompareResult> {
+  const q = new URLSearchParams();
+  if (f.zoneId) q.set("zoneId", f.zoneId);
+  if (f.serviceId) q.set("serviceId", f.serviceId);
+  if (f.status) q.set("status", f.status);
+  if (f.from) q.set("from", f.from);
+  if (f.to) q.set("to", f.to);
+  const res = await fetch("/api/capacity/compare?" + q.toString());
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "查询容量对比失败");
+  }
+  return res.json();
 }
 
 // Subscribe to live state over SSE. Falls back to polling if the stream

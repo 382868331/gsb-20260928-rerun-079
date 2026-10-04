@@ -6,6 +6,7 @@ import {
   setZoneCapacity, setZoneFailure, comparePlans,
 } from "./api";
 import type { Batch, Plan, Snapshot } from "./types";
+import { CapacityCompare } from "./CapacityCompare";
 
 const phaseLabel: Record<string, string> = {
   pending: "等待",
@@ -298,6 +299,8 @@ export function App() {
       )}
 
       <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />
+
+      {!envEmpty && <CapacityCompare snap={snap} onError={setError} />}
 
       {shownRelease ? (
         <section className="card release">
