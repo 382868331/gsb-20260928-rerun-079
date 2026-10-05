@@ -12,6 +12,9 @@ func (e *Engine) reconcile(tx *store.Tx, now time.Time) (bool, error) {
 	// before any batch decision, so a freed slot can be re-acquired in the
 	// same tick by a waiting batch.
 	if e.releaseSettledGrants(tx, now) {
+		// Capacity changed hands: the coordinated order must be recomputed
+		// so waiting batches and deadlines reflect the freed slots.
+		e.Replan(tx, now, "实例归还容量")
 		return true, nil
 	}
 	for i := range tx.Releases() {
@@ -116,12 +119,30 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		for _, f := range pre.Findings {
 			tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "info", "扩批前兼容检查："+f.Detail)
 		}
+		// Cross-release coordination: a queued release with higher
+		// effective priority (base priority + waiting-time aging) takes
+		// this zone's next free slots first. Only not-yet-executed batches
+		// are reordered; in-flight updates/rollbacks are never preempted.
+		if reason, yield := e.shouldYield(tx, rel, b, now); yield {
+			if b.CapacityWait != reason {
+				if b.CapacityWait == "" {
+					b.CapacityWaitSince = nowStr(now)
+				}
+				b.CapacityWait = reason
+				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" "+reason)
+				return true
+			}
+			return false
+		}
 		// Zone capacity review: the batch may only expand after acquiring a
 		// queryable capacity commitment for every zone it touches. Two
 		// individually safe plans can conflict in parallel; the later one
 		// waits here with a persisted, reopenable reason.
 		if reason, ok := e.tryAcquireCapacity(tx, rel, b, now); !ok {
 			if b.CapacityWait != reason {
+				if b.CapacityWait == "" {
+					b.CapacityWaitSince = nowStr(now)
+				}
 				b.CapacityWait = reason
 				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 等待区域容量："+reason)
 				return true

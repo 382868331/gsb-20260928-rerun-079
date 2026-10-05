@@ -23,6 +23,7 @@ type Store struct {
 	grants    []CapacityGrant
 	ops       []Op
 	events    []Event
+	plans     []PlanRecord
 	eventSeq  int64
 }
 
@@ -66,6 +67,9 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	if err := must("events.json", &s.events); err != nil {
+		return nil, err
+	}
+	if err := must("plans.json", &s.plans); err != nil {
 		return nil, err
 	}
 	s.eventSeq = int64(len(s.events))
@@ -118,6 +122,7 @@ func (tx *Tx) Batches() []Batch        { return tx.s.batches }
 func (tx *Tx) Grants() []CapacityGrant { return tx.s.grants }
 func (tx *Tx) Ops() []Op               { return tx.s.ops }
 func (tx *Tx) Events() []Event         { return tx.s.events }
+func (tx *Tx) Plans() []PlanRecord     { return tx.s.plans }
 
 func (tx *Tx) SetVersions(v []Version)     { tx.s.versions = v }
 func (tx *Tx) SetServices(v []Service)     { tx.s.services = v }
@@ -128,6 +133,7 @@ func (tx *Tx) SetReleases(v []Release)     { tx.s.releases = v }
 func (tx *Tx) SetBatches(v []Batch)        { tx.s.batches = v }
 func (tx *Tx) SetGrants(v []CapacityGrant) { tx.s.grants = v }
 func (tx *Tx) SetOps(v []Op)               { tx.s.ops = v }
+func (tx *Tx) SetPlans(v []PlanRecord)     { tx.s.plans = v }
 
 func (tx *Tx) AddEvent(at, releaseID, batchID, instanceID, level, msg string) {
 	tx.s.eventSeq++
@@ -152,6 +158,7 @@ func (s *Store) flush() error {
 		{"grants.json", s.grants},
 		{"ops.json", s.ops},
 		{"events.json", s.events},
+		{"plans.json", s.plans},
 	}
 	for _, w := range writes {
 		if err := writeJSONAtomic(filepath.Join(s.dir, w.name), w.val); err != nil {

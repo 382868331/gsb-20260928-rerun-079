@@ -50,6 +50,27 @@ func capacityCheck(tx *store.Tx, zone *store.Zone, memberIDs []string) (string, 
 		return "", true
 	}
 	occupied := occupiedInZone(tx, zone.ID)
+	holders := map[string]bool{}
+	for _, relID := range occupied {
+		holders[relID] = true
+	}
+	holderList := make([]string, 0, len(holders))
+	for id := range holders {
+		holderList = append(holderList, id)
+	}
+	sort.Strings(holderList)
+	return capacityCheckOccupied(tx, zone, memberIDs, occupied, holderList)
+}
+
+// capacityCheckOccupied is capacityCheck against an explicitly supplied
+// occupancy map (instance ID -> holding release ID), so the coordinator can
+// evaluate simulated future states with the exact same rules as live
+// admission. holderList names the releases holding the conflicting
+// commitments, for human-readable reasons.
+func capacityCheckOccupied(tx *store.Tx, zone *store.Zone, memberIDs []string, occupied map[string]string, holderList []string) (string, bool) {
+	if zone == nil || len(memberIDs) == 0 {
+		return "", true
+	}
 	byService := map[string][]string{}
 	for _, inst := range tx.Instances() {
 		if inst.ZoneID == zone.ID {
@@ -67,15 +88,6 @@ func capacityCheck(tx *store.Tx, zone *store.Zone, memberIDs []string) (string, 
 		services = append(services, svc)
 	}
 	sort.Strings(services)
-	holders := map[string]bool{}
-	for _, relID := range occupied {
-		holders[relID] = true
-	}
-	holderList := make([]string, 0, len(holders))
-	for id := range holders {
-		holderList = append(holderList, id)
-	}
-	sort.Strings(holderList)
 	holderText := ""
 	if len(holderList) > 0 {
 		holderText = "；正被发布 " + strings.Join(holderList, "、") + " 占用"
@@ -182,6 +194,7 @@ func (e *Engine) tryAcquireCapacity(tx *store.Tx, rel *store.Release, b *store.B
 	}
 	tx.SetGrants(grants)
 	b.CapacityWait = ""
+	b.CapacityWaitSince = ""
 	return "", true
 }
 

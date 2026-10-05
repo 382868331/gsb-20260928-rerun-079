@@ -7,6 +7,7 @@ import {
 } from "./api";
 import type { Batch, Plan, Snapshot } from "./types";
 import { CapacityCompareView } from "./CapacityCompare";
+import { ScheduleBoard } from "./ScheduleBoard";
 
 const phaseLabel: Record<string, string> = {
   pending: "等待",
@@ -80,6 +81,8 @@ export function App() {
   const [pauseOnFailure, setPauseOnFailure] = useState(true);
   const [serviceId, setServiceId] = useState("");
   const [plans, setPlans] = useState<Plan[] | null>(null);
+  const [priority, setPriority] = useState(0);
+  const [deadline, setDeadline] = useState("");
 
   useEffect(
     () =>
@@ -120,6 +123,8 @@ export function App() {
         targetVersion: target,
         batchSize: Number(batchSize),
         strategy: strategy as "rolling" | "all_at_once",
+        priority: Number(priority),
+        deadline: deadline ? new Date(deadline).toISOString() : undefined,
         failure: {
           mode: mode as Snapshot["releases"][number]["failure"]["mode"],
           instances: mode === "instances" ? failInstances.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
@@ -188,17 +193,17 @@ export function App() {
         <div className="card controls">
           <h2><Play size={18} /> 发起演练发布</h2>
           <label>目标服务
-            <select value={serviceId || snap.services[0]?.id || ""} onChange={(e) => setServiceId(e.target.value)} disabled={!!activeRelease}>
+            <select value={serviceId || snap.services[0]?.id || ""} onChange={(e) => setServiceId(e.target.value)} disabled={envEmpty}>
               {snap.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </label>
           <label>目标版本
-            <select value={target} onChange={(e) => setTarget(e.target.value)} disabled={!!activeRelease}>
+            <select value={target} onChange={(e) => setTarget(e.target.value)} disabled={envEmpty}>
               {snap.versions.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}
             </select>
           </label>
           <label>发布策略
-            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={!!activeRelease}>
+            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={envEmpty}>
               <option value="rolling">分批滚动（按批次逐步扩批）</option>
               <option value="zone_spread">跨区域分散（每批均匀分布到各故障区域）</option>
               <option value="all_at_once">全量一次性（全部实例同批）</option>
@@ -206,10 +211,18 @@ export function App() {
           </label>
           <label>每批实例数
             <input type="number" min={1} max={snap.instances.length} value={batchSize}
-              disabled={!!activeRelease || strategy === "all_at_once"} onChange={(e) => setBatchSize(Number(e.target.value))} />
+              disabled={envEmpty || strategy === "all_at_once"} onChange={(e) => setBatchSize(Number(e.target.value))} />
+          </label>
+          <label>优先级（越大越先取得共享容量）
+            <input type="number" min={0} max={99} value={priority} disabled={envEmpty}
+              onChange={(e) => setPriority(Number(e.target.value))} />
+          </label>
+          <label>最迟完成时间（可选）
+            <input type="datetime-local" value={deadline} disabled={envEmpty}
+              onChange={(e) => setDeadline(e.target.value)} />
           </label>
           <label>故障注入
-            <select value={mode} onChange={(e) => setMode(e.target.value)} disabled={!!activeRelease}>
+            <select value={mode} onChange={(e) => setMode(e.target.value)} disabled={envEmpty}>
               <option value="none">无故障（正常发布）</option>
               <option value="half_batch">半批健康失败（首批前一半）</option>
               <option value="instances">指定实例健康失败</option>
@@ -218,22 +231,22 @@ export function App() {
           </label>
           {mode === "instances" && (
             <label>失败实例 ID（逗号分隔）
-              <input value={failInstances} onChange={(e) => setFailInstances(e.target.value)} disabled={!!activeRelease} />
+              <input value={failInstances} onChange={(e) => setFailInstances(e.target.value)} disabled={envEmpty} />
             </label>
           )}
           {mode === "rollback_interrupt" && (
             <label>每台实例回退中断次数
-              <input type="number" min={1} value={rollbackN} disabled={!!activeRelease}
+              <input type="number" min={1} value={rollbackN} disabled={envEmpty}
                 onChange={(e) => setRollbackN(Number(e.target.value))} />
             </label>
           )}
           <label className="check">
-            <input type="checkbox" checked={pauseOnFailure} disabled={!!activeRelease}
+            <input type="checkbox" checked={pauseOnFailure} disabled={envEmpty}
               onChange={(e) => setPauseOnFailure(e.target.checked)} />
             失败后暂停，审查失败实例再决定继续回退或结束
           </label>
           <div className="actions">
-            <button className="primary" onClick={submit} disabled={!!activeRelease || envEmpty}>开始按批次发布</button>
+            <button className="primary" onClick={submit} disabled={envEmpty}>开始按批次发布</button>
             <button
               disabled={!!activeRelease || envEmpty}
               onClick={() =>
@@ -301,6 +314,8 @@ export function App() {
       <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />
 
       {snap.releases.length > 0 && <CapacityCompareView snap={snap} />}
+
+      <ScheduleBoard snap={snap} />
 
       {shownRelease ? (
         <section className="card release">

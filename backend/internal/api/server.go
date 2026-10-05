@@ -66,6 +66,7 @@ func (s *Server) snapshot() store.Snapshot {
 			Grants:    append([]store.CapacityGrant{}, tx.Grants()...),
 			Ops:       append([]store.Op{}, tx.Ops()...),
 			Events:    append([]store.Event{}, tx.Events()...),
+			Plans:     append([]store.PlanRecord{}, tx.Plans()...),
 		}
 	})
 	snap.Dependencies = append([]store.DependencyStatus{}, s.svc.DependencyStatuses()...)

@@ -92,8 +92,21 @@ func serviceInstances(tx *store.Tx, serviceID string) []store.Instance {
 			out = append(out, inst)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool { return instanceIDLess(out[i].ID, out[j].ID) })
 	return out
+}
+
+// instanceIDLess orders instance IDs by their numeric suffix when both are
+// numeric, so generated instances always sort after the seeded inst-1..6 no
+// matter how large the global ID counter has grown (string sort would place
+// "inst-105" before "inst-2" and silently reshuffle batch composition).
+func instanceIDLess(a, b string) bool {
+	na, ea := strconv.Atoi(strings.TrimPrefix(a, "inst-"))
+	nb, eb := strconv.Atoi(strings.TrimPrefix(b, "inst-"))
+	if ea == nil && eb == nil {
+		return na < nb
+	}
+	return a < b
 }
 
 // compareVersions orders semver-ish ids (v1.2.3); falls back to string order.

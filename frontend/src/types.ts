@@ -99,6 +99,7 @@ export interface Batch {
   members: MemberState[];
   preflight?: Preflight;
   capacityWait?: string;
+  capacityWaitSince?: string;
   grantIds?: string[];
   startedAt?: string;
   finishedAt?: string;
@@ -130,6 +131,8 @@ export interface Release {
   reviewAt?: string;
   compatBlocked?: boolean;
   rollbackNote?: string;
+  priority: number;
+  deadline?: string;
   createdAt: string;
   finishedAt?: string;
   message?: string;
@@ -170,6 +173,37 @@ export interface Snapshot {
   ops: Op[];
   events: Event[];
   dependencies: DependencyStatus[];
+  plans: PlanRecord[];
+}
+
+export interface PlanEntry {
+  order: number;
+  releaseId: string;
+  serviceName: string;
+  batchId: string;
+  batchIndex: number;
+  priority: number;
+  zones: string[];
+  estimatedStart: string;
+  estimatedEnd: string;
+  note?: string;
+}
+
+export interface PlanConflict {
+  releaseId: string;
+  serviceName: string;
+  batchId: string;
+  batchIndex: number;
+  deadlineMiss: boolean;
+  reason: string;
+}
+
+export interface PlanRecord {
+  id: string;
+  at: string;
+  trigger: string;
+  entries: PlanEntry[];
+  conflicts: PlanConflict[];
 }
 
 export interface PlanBatch {

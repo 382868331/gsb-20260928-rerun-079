@@ -135,10 +135,13 @@ type Batch struct {
 	// CapacityWait is the persisted reason this batch cannot acquire zone
 	// capacity yet (which release holds the conflicting commitment). It
 	// survives a reopen and clears once the batch acquires its grants.
-	CapacityWait string   `json:"capacityWait,omitempty"`
-	GrantIDs     []string `json:"grantIds,omitempty"`
-	StartedAt    string   `json:"startedAt,omitempty"`
-	FinishedAt   string   `json:"finishedAt,omitempty"`
+	CapacityWait string `json:"capacityWait,omitempty"`
+	// CapacityWaitSince is when the current wait started. Waiting time
+	// feeds the aging that keeps low-priority releases from starving.
+	CapacityWaitSince string   `json:"capacityWaitSince,omitempty"`
+	GrantIDs          []string `json:"grantIds,omitempty"`
+	StartedAt         string   `json:"startedAt,omitempty"`
+	FinishedAt        string   `json:"finishedAt,omitempty"`
 }
 
 // FailureSpec injects failures for a drill without deploying anything.
@@ -176,9 +179,56 @@ type Release struct {
 	// roll back: whether dependents stay compatible and which completed
 	// batches can no longer be undone.
 	RollbackNote string `json:"rollbackNote,omitempty"`
-	CreatedAt    string `json:"createdAt"`
-	FinishedAt   string `json:"finishedAt,omitempty"`
-	Message      string `json:"message,omitempty"`
+	// Priority orders capacity admission across concurrently waiting
+	// releases: higher wins. Waiting time accumulates on top of it so a
+	// low-priority release can never starve (aging).
+	Priority int `json:"priority"`
+	// Deadline is the operator-set latest acceptable finish time
+	// (RFC3339). The coordinator reports a concrete capacity conflict
+	// whenever the planned batch order cannot meet it. Empty = no limit.
+	Deadline   string `json:"deadline,omitempty"`
+	CreatedAt  string `json:"createdAt"`
+	FinishedAt string `json:"finishedAt,omitempty"`
+	Message    string `json:"message,omitempty"`
+}
+
+// PlanEntry is one not-yet-executed batch placed into the coordinated
+// cross-release execution order.
+type PlanEntry struct {
+	Order          int      `json:"order"`
+	ReleaseID      string   `json:"releaseId"`
+	ServiceName    string   `json:"serviceName"`
+	BatchID        string   `json:"batchId"`
+	BatchIndex     int      `json:"batchIndex"`
+	Priority       int      `json:"priority"`
+	Zones          []string `json:"zones"`
+	EstimatedStart string   `json:"estimatedStart"`
+	EstimatedEnd   string   `json:"estimatedEnd"`
+	Note           string   `json:"note,omitempty"`
+}
+
+// PlanConflict explains, with concrete zone numbers and the holding
+// release, why one batch cannot be placed (or cannot finish before its
+// release's deadline).
+type PlanConflict struct {
+	ReleaseID    string `json:"releaseId"`
+	ServiceName  string `json:"serviceName"`
+	BatchID      string `json:"batchId"`
+	BatchIndex   int    `json:"batchIndex"`
+	DeadlineMiss bool   `json:"deadlineMiss"`
+	Reason       string `json:"reason"`
+}
+
+// PlanRecord is one persisted coordination plan. A new record is appended
+// whenever the queue is re-planned (release created/cancelled, zone
+// capacity changed, capacity handed back), so the reason of every
+// reordering stays queryable after a reopen.
+type PlanRecord struct {
+	ID        string         `json:"id"`
+	At        string         `json:"at"`
+	Trigger   string         `json:"trigger"`
+	Entries   []PlanEntry    `json:"entries"`
+	Conflicts []PlanConflict `json:"conflicts"`
 }
 
 // Op is a virtual asynchronous operation with a scheduled due time. All
@@ -220,6 +270,9 @@ type Snapshot struct {
 	Grants    []CapacityGrant `json:"grants"`
 	Ops       []Op            `json:"ops"`
 	Events    []Event         `json:"events"`
+	// Plans is the persisted history of coordination re-plans, newest
+	// last. The final record is the currently effective batch order.
+	Plans []PlanRecord `json:"plans"`
 	// Dependencies lists, per in-flight release, the compatibility
 	// constraints that are not yet satisfied (unfinished dependencies).
 	Dependencies []DependencyStatus `json:"dependencies"`

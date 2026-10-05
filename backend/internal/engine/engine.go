@@ -12,10 +12,14 @@ type Config struct {
 	UpdateDelay   time.Duration
 	HealthDelay   time.Duration
 	RollbackDelay time.Duration
+	// AgingUnit is the waiting time that compensates one priority level
+	// when releases compete for shared zone capacity. Zero uses the
+	// default of 60 seconds.
+	AgingUnit time.Duration
 }
 
 func DefaultConfig() Config {
-	return Config{UpdateDelay: 2 * time.Second, HealthDelay: 3 * time.Second, RollbackDelay: 2 * time.Second}
+	return Config{UpdateDelay: 2 * time.Second, HealthDelay: 3 * time.Second, RollbackDelay: 2 * time.Second, AgingUnit: 60 * time.Second}
 }
 
 type Engine struct {

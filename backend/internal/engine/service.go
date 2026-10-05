@@ -87,6 +87,13 @@ type CreateReleaseRequest struct {
 	BatchSize     int               `json:"batchSize"`
 	Strategy      string            `json:"strategy"`
 	Failure       store.FailureSpec `json:"failure"`
+	// Priority orders capacity admission across concurrently waiting
+	// releases (higher wins; waiting time still ages every release).
+	Priority int `json:"priority"`
+	// Deadline is the latest acceptable finish time (RFC3339). The
+	// coordinator reports a concrete capacity conflict when the planned
+	// batch order cannot meet it.
+	Deadline string `json:"deadline"`
 }
 
 func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store.Release, error) {
@@ -95,6 +102,14 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 	}
 	if req.Strategy == "" {
 		req.Strategy = "rolling"
+	}
+	deadline := ""
+	if req.Deadline != "" {
+		d, err := time.Parse(time.RFC3339, req.Deadline)
+		if err != nil {
+			return nil, errors.New("最迟完成时间格式不正确（应为 RFC3339，如 2026-10-06T18:00:00+08:00）")
+		}
+		deadline = d.UTC().Format(time.RFC3339Nano)
 	}
 	var created *store.Release
 	err := s.st.Mutate(func(tx *store.Tx) error {
@@ -141,7 +156,7 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		rel := store.Release{
 			ID: newID(tx, "rel"), ServiceID: serviceID, TargetVersion: target.ID, Baseline: baseline,
 			Strategy: req.Strategy, BatchSize: req.BatchSize, Status: "pending",
-			Failure: req.Failure, CreatedAt: nowStr(now),
+			Failure: req.Failure, Priority: req.Priority, Deadline: deadline, CreatedAt: nowStr(now),
 		}
 		var batches []store.Batch
 		idx := 0
@@ -171,6 +186,9 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "info",
 			fmt.Sprintf("创建发布 %s：服务 %s，策略 %s，%d 个批次，每批 %d 台，目标版本 %s",
 				rel.ID, serviceName(tx, serviceID), rel.Strategy, len(batches), rel.BatchSize, target.ID))
+		// A new release joins the shared-capacity queue: recompute the
+		// coordinated order of every not-yet-executed batch.
+		s.e.Replan(tx, now, "创建发布 "+rel.ID)
 		rc := rel
 		created = &rc
 		return nil
@@ -198,6 +216,11 @@ func (s *Service) CancelRelease(releaseID string, now time.Time) error {
 			rel.Status = "cancelling"
 		}
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "收到取消请求：停止继续扩批；暂停/取消后到达的健康结果只作为证据留档，不再改变终止决定。 "+rel.RollbackNote)
+		// Cancelling frees this release's future claims on the queue: only
+		// the remaining not-yet-executed batches of the other releases are
+		// re-planned; its in-flight batch keeps its commitments until the
+		// rollback settles by real instance state.
+		s.e.Replan(tx, now, "取消发布 "+rel.ID)
 		return nil
 	})
 }
@@ -646,6 +669,11 @@ func (s *Service) SetZoneCapacity(zoneID string, minAvailable map[string]int, sh
 		z.SharedCapacity = sharedCapacity
 		tx.AddEvent(nowStr(now), "", "", "", "info",
 			fmt.Sprintf("更新故障区域 %s 容量配置：最低可用 %v，跨服务共享容量 %d 台", z.Name, clean, sharedCapacity))
+		// Zone capacity changed (e.g. a downsize): re-plan only the
+		// not-yet-executed batches. Commitments already acquired stay
+		// valid and every service's minimum-available rule keeps applying
+		// to future admissions.
+		s.e.Replan(tx, now, "调整区域 "+z.Name+" 容量")
 		return nil
 	})
 }

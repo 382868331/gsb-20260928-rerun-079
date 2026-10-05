@@ -181,6 +181,15 @@ button.warning:disabled { opacity: .5; cursor: not-allowed; }
 .grants li.released { color: var(--ok); }
 
 .plans { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 10px; font-size: 13px; }
+
+.schedule h3 { display: flex; align-items: center; gap: 6px; margin: 14px 0 6px; font-size: 14px; }
+.schedule h3 .hint { margin: 0 0 0 6px; font-weight: normal; }
+.schedule td.bad, .schedule li.bad { color: var(--err); }
+.wait-list { margin: 6px 0; padding-left: 18px; font-size: 13px; }
+.wait-list li { margin: 4px 0; }
+.conflicts { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-top: 8px; font-size: 13px; }
+.conflicts ul { margin: 6px 0 0; padding-left: 18px; }
+.conflicts li { margin: 4px 0; }
 .plans h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 13.5px; }
 .plan { margin: 8px 0; }
 .plan ul { margin: 4px 0 0; padding-left: 18px; }
