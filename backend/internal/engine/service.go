@@ -82,11 +82,19 @@ func (s *Service) Seed(now time.Time) error {
 }
 
 type CreateReleaseRequest struct {
-	ServiceID     string            `json:"serviceId"`
-	TargetVersion string            `json:"targetVersion"`
-	BatchSize     int               `json:"batchSize"`
-	Strategy      string            `json:"strategy"`
-	Failure       store.FailureSpec `json:"failure"`
+	ServiceID     string `json:"serviceId"`
+	TargetVersion string `json:"targetVersion"`
+	BatchSize     int    `json:"batchSize"`
+	Strategy      string `json:"strategy"`
+	// Priority orders this release against other in-flight releases when
+	// they compete for shared zone capacity (higher = first). It only
+	// reorders not-yet-started batches.
+	Priority int `json:"priority"`
+	// Deadline is the latest acceptable finish time (RFC3339). The
+	// coordination plan reports the concrete capacity conflict when the
+	// estimate exceeds it.
+	Deadline string            `json:"deadline"`
+	Failure  store.FailureSpec `json:"failure"`
 }
 
 func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store.Release, error) {
@@ -95,6 +103,15 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 	}
 	if req.Strategy == "" {
 		req.Strategy = "rolling"
+	}
+	if req.Deadline != "" {
+		dl, err := time.Parse(time.RFC3339, req.Deadline)
+		if err != nil {
+			return nil, errors.New("最迟完成时间格式无效，应为 RFC3339（如 2026-10-06T18:00:00+08:00）")
+		}
+		if !dl.After(now) {
+			return nil, errors.New("最迟完成时间必须晚于当前时间")
+		}
 	}
 	var created *store.Release
 	err := s.st.Mutate(func(tx *store.Tx) error {
@@ -141,6 +158,7 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		rel := store.Release{
 			ID: newID(tx, "rel"), ServiceID: serviceID, TargetVersion: target.ID, Baseline: baseline,
 			Strategy: req.Strategy, BatchSize: req.BatchSize, Status: "pending",
+			Priority: req.Priority, Deadline: req.Deadline,
 			Failure: req.Failure, CreatedAt: nowStr(now),
 		}
 		var batches []store.Batch
@@ -168,9 +186,13 @@ func (s *Service) CreateRelease(req CreateReleaseRequest, now time.Time) (*store
 		}
 		tx.SetReleases(append(tx.Releases(), rel))
 		tx.SetBatches(append(tx.Batches(), batches...))
+		deadlineNote := "无最迟完成时间"
+		if rel.Deadline != "" {
+			deadlineNote = "最迟完成 " + rel.Deadline
+		}
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "info",
-			fmt.Sprintf("创建发布 %s：服务 %s，策略 %s，%d 个批次，每批 %d 台，目标版本 %s",
-				rel.ID, serviceName(tx, serviceID), rel.Strategy, len(batches), rel.BatchSize, target.ID))
+			fmt.Sprintf("创建发布 %s：服务 %s，策略 %s，%d 个批次，每批 %d 台，目标版本 %s，优先级 %d，%s",
+				rel.ID, serviceName(tx, serviceID), rel.Strategy, len(batches), rel.BatchSize, target.ID, rel.Priority, deadlineNote))
 		rc := rel
 		created = &rc
 		return nil
@@ -198,6 +220,9 @@ func (s *Service) CancelRelease(releaseID string, now time.Time) error {
 			rel.Status = "cancelling"
 		}
 		tx.AddEvent(nowStr(now), rel.ID, "", "", "warn", "收到取消请求：停止继续扩批；暂停/取消后到达的健康结果只作为证据留档，不再改变终止决定。 "+rel.RollbackNote)
+		// Cancelling frees this release's future claims; only the remaining
+		// releases' not-yet-started batches are re-evaluated.
+		s.e.emitReorderAssessment(tx, now, "发布 "+rel.ID+" 取消")
 		return nil
 	})
 }
@@ -566,6 +591,17 @@ func (s *Service) AddRule(rule store.CompatRule, now time.Time) (*store.CompatRu
 	return out, err
 }
 
+// ScheduleView exposes the coordinated multi-release execution plan
+// (executable batch order + per-release deadline estimates with concrete
+// capacity conflicts). Read-only.
+func (s *Service) ScheduleView(now time.Time) store.ScheduleView {
+	var v store.ScheduleView
+	s.st.View(func(tx *store.Tx) {
+		v = s.e.BuildSchedule(tx, now)
+	})
+	return v
+}
+
 // DependencyStatuses computes, for every in-flight release, the compatibility
 // constraints that are not yet satisfied (unfinished dependencies).
 func (s *Service) DependencyStatuses() []store.DependencyStatus {
@@ -642,10 +678,18 @@ func (s *Service) SetZoneCapacity(zoneID string, minAvailable map[string]int, sh
 				clean[svc] = n
 			}
 		}
+		oldShared := z.SharedCapacity
 		z.MinAvailable = clean
 		z.SharedCapacity = sharedCapacity
+		cause := "区域容量调整"
+		if sharedCapacity < oldShared {
+			cause = fmt.Sprintf("区域降容 %d→%d 台", oldShared, sharedCapacity)
+		}
 		tx.AddEvent(nowStr(now), "", "", "", "info",
 			fmt.Sprintf("更新故障区域 %s 容量配置：最低可用 %v，跨服务共享容量 %d 台", z.Name, clean, sharedCapacity))
+		// Runtime capacity changes only reorder not-yet-started batches:
+		// held commitments stay valid and in-flight instances keep running.
+		s.e.emitReorderAssessment(tx, now, z.Name+cause)
 		return nil
 	})
 }

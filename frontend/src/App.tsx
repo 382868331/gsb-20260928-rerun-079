@@ -79,6 +79,8 @@ export function App() {
   const [strategy, setStrategy] = useState("rolling");
   const [pauseOnFailure, setPauseOnFailure] = useState(true);
   const [serviceId, setServiceId] = useState("");
+  const [priority, setPriority] = useState(0);
+  const [deadline, setDeadline] = useState("");
   const [plans, setPlans] = useState<Plan[] | null>(null);
 
   useEffect(
@@ -92,6 +94,17 @@ export function App() {
 
   const activeRelease = useMemo(
     () => snap?.releases.find((r) => !["succeeded", "rolled_back", "cancelled", "failed"].includes(r.status)),
+    [snap]
+  );
+  // Several releases may run at once (one per service); the form is only
+  // locked while the selected service already has one in flight.
+  const busyServices = useMemo(
+    () =>
+      new Set(
+        (snap?.releases ?? [])
+          .filter((r) => !["succeeded", "rolled_back", "cancelled", "failed"].includes(r.status))
+          .map((r) => r.serviceId)
+      ),
     [snap]
   );
   const latestRelease = snap?.releases[snap.releases.length - 1];
@@ -120,6 +133,8 @@ export function App() {
         targetVersion: target,
         batchSize: Number(batchSize),
         strategy: strategy as "rolling" | "all_at_once",
+        priority: Number(priority),
+        deadline: deadline ? new Date(deadline).toISOString() : undefined,
         failure: {
           mode: mode as Snapshot["releases"][number]["failure"]["mode"],
           instances: mode === "instances" ? failInstances.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
@@ -188,17 +203,21 @@ export function App() {
         <div className="card controls">
           <h2><Play size={18} /> 发起演练发布</h2>
           <label>目标服务
-            <select value={serviceId || snap.services[0]?.id || ""} onChange={(e) => setServiceId(e.target.value)} disabled={!!activeRelease}>
-              {snap.services.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            <select value={serviceId || snap.services[0]?.id || ""} onChange={(e) => setServiceId(e.target.value)}>
+              {snap.services.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}{busyServices.has(s.id) ? "（已有进行中的发布）" : ""}
+                </option>
+              ))}
             </select>
           </label>
           <label>目标版本
-            <select value={target} onChange={(e) => setTarget(e.target.value)} disabled={!!activeRelease}>
+            <select value={target} onChange={(e) => setTarget(e.target.value)}>
               {snap.versions.map((v) => <option key={v.id} value={v.id}>{v.id}</option>)}
             </select>
           </label>
           <label>发布策略
-            <select value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={!!activeRelease}>
+            <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
               <option value="rolling">分批滚动（按批次逐步扩批）</option>
               <option value="zone_spread">跨区域分散（每批均匀分布到各故障区域）</option>
               <option value="all_at_once">全量一次性（全部实例同批）</option>
@@ -206,10 +225,16 @@ export function App() {
           </label>
           <label>每批实例数
             <input type="number" min={1} max={snap.instances.length} value={batchSize}
-              disabled={!!activeRelease || strategy === "all_at_once"} onChange={(e) => setBatchSize(Number(e.target.value))} />
+              disabled={strategy === "all_at_once"} onChange={(e) => setBatchSize(Number(e.target.value))} />
+          </label>
+          <label>优先级（越大越先获得共享容量）
+            <input type="number" value={priority} onChange={(e) => setPriority(Number(e.target.value))} />
+          </label>
+          <label>最迟完成时间（可空）
+            <input type="datetime-local" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
           </label>
           <label>故障注入
-            <select value={mode} onChange={(e) => setMode(e.target.value)} disabled={!!activeRelease}>
+            <select value={mode} onChange={(e) => setMode(e.target.value)}>
               <option value="none">无故障（正常发布）</option>
               <option value="half_batch">半批健康失败（首批前一半）</option>
               <option value="instances">指定实例健康失败</option>
@@ -218,24 +243,24 @@ export function App() {
           </label>
           {mode === "instances" && (
             <label>失败实例 ID（逗号分隔）
-              <input value={failInstances} onChange={(e) => setFailInstances(e.target.value)} disabled={!!activeRelease} />
+              <input value={failInstances} onChange={(e) => setFailInstances(e.target.value)} />
             </label>
           )}
           {mode === "rollback_interrupt" && (
             <label>每台实例回退中断次数
-              <input type="number" min={1} value={rollbackN} disabled={!!activeRelease}
+              <input type="number" min={1} value={rollbackN}
                 onChange={(e) => setRollbackN(Number(e.target.value))} />
             </label>
           )}
           <label className="check">
-            <input type="checkbox" checked={pauseOnFailure} disabled={!!activeRelease}
+            <input type="checkbox" checked={pauseOnFailure}
               onChange={(e) => setPauseOnFailure(e.target.checked)} />
             失败后暂停，审查失败实例再决定继续回退或结束
           </label>
           <div className="actions">
-            <button className="primary" onClick={submit} disabled={!!activeRelease || envEmpty}>开始按批次发布</button>
+            <button className="primary" onClick={submit} disabled={envEmpty || busyServices.has(serviceId || snap.services[0]?.id || "")}>开始按批次发布</button>
             <button
-              disabled={!!activeRelease || envEmpty}
+              disabled={envEmpty}
               onClick={() =>
                 comparePlans(serviceId || snap.services[0]?.id || "", Number(batchSize))
                   .then(setPlans)
@@ -298,6 +323,8 @@ export function App() {
         </section>
       )}
 
+      {!envEmpty && <ScheduleBoard snap={snap} />}
+
       <VersionDistribution snap={snap} batches={shownRelease ? batches : []} />
 
       {snap.releases.length > 0 && <CapacityCompareView snap={snap} />}
@@ -309,7 +336,9 @@ export function App() {
           </h2>
           <p className="sub">
             服务 {serviceName(shownRelease.serviceId)} · 目标 <code>{shownRelease.targetVersion}</code>，基线 <code>{shownRelease.baseline}</code>，
-            策略 {shownRelease.strategy}，每批 {shownRelease.batchSize} 台 · {shownRelease.message ?? "进行中，所有进度实时持久化"}
+            策略 {shownRelease.strategy}，每批 {shownRelease.batchSize} 台，优先级 {shownRelease.priority}
+            {shownRelease.deadline ? `，最迟完成 ${new Date(shownRelease.deadline).toLocaleString("zh-CN", { hour12: false })}` : ""} ·{" "}
+            {shownRelease.message ?? "进行中，所有进度实时持久化"}
           </p>
           {shownRelease.compatBlocked && (
             <p className="error">兼容约束阻止推进：依赖者必须先更新到兼容版本，之后到审查中选择“继续”。</p>
@@ -356,6 +385,73 @@ export function App() {
         </div>
       </section>
     </div>
+  );
+}
+
+const scheduleStateLabel: Record<string, string> = {
+  running: "执行中",
+  ready: "可立即执行",
+  waiting: "等待中",
+  conflict: "容量冲突",
+};
+
+// ScheduleBoard is the operations view of multi-release coordination: the
+// executable batch order across all in-flight releases, why each batch is
+// waiting (and which release holds the conflicting commitment), and whether
+// each release can meet its latest-finish deadline — with the concrete
+// capacity conflict when it cannot.
+function ScheduleBoard({ snap }: { snap: Snapshot }) {
+  const schedule = snap.schedule;
+  const inFlight = snap.releases.filter(
+    (r) => !["succeeded", "rolled_back", "cancelled", "failed"].includes(r.status)
+  );
+  if (inFlight.length === 0 && schedule.queue.length === 0) return null;
+  return (
+    <section className="card schedule">
+      <h2><ListOrdered size={18} /> 多发布协调（共享容量调度）</h2>
+      <p className="sub">
+        等待中的高优先级发布只会重排尚未执行的批次；正在更新或回退的实例不会被抢占；长时间等待的发布会自动提升有效优先级，避免持续饥饿。
+      </p>
+      {schedule.queue.length > 0 && (
+        <table>
+          <thead>
+            <tr><th>顺序</th><th>发布</th><th>服务</th><th>批次</th><th>优先级</th><th>状态</th><th>原因</th></tr>
+          </thead>
+          <tbody>
+            {schedule.queue.map((q) => (
+              <tr key={q.batchId}>
+                <td>{q.order + 1}</td>
+                <td><code>{q.releaseId}</code></td>
+                <td>{q.serviceName}</td>
+                <td>第 {q.batchIndex + 1} 批</td>
+                <td>{q.priority}{q.effectivePriority !== q.priority * 100 ? `（有效 ${q.effectivePriority}，含等待加权）` : ""}</td>
+                <td><span className={"pill sq-" + q.state}>{scheduleStateLabel[q.state] ?? q.state}</span></td>
+                <td className="reason">{q.reason || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {schedule.estimates.length > 0 && (
+        <div className="estimates">
+          <strong>完成时间评估：</strong>
+          <ul>
+            {schedule.estimates.map((e) => (
+              <li key={e.releaseId} className={e.onTime ? "ok" : "bad"}>
+                <code>{e.releaseId}</code>（{e.serviceName}，优先级 {e.priority}）预计 {timeShort(e.estimatedFinish)} 完成
+                {e.deadline
+                  ? `，最迟 ${new Date(e.deadline).toLocaleString("zh-CN", { hour12: false })}：${e.onTime ? "可按期完成" : "无法按期完成"}`
+                  : "，未设置最迟完成时间"}
+                {(e.conflicts ?? []).map((c, i) => (
+                  <span key={i} className="conflict">容量冲突：{c}</span>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {schedule.queue.length === 0 && <p className="empty">当前没有等待或执行中的批次。</p>}
+    </section>
   );
 }
 

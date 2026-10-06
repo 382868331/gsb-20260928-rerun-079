@@ -182,6 +182,7 @@ func (e *Engine) tryAcquireCapacity(tx *store.Tx, rel *store.Release, b *store.B
 	}
 	tx.SetGrants(grants)
 	b.CapacityWait = ""
+	b.CapacityWaitSince = ""
 	return "", true
 }
 

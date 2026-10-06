@@ -16,6 +16,7 @@ export function normalizeSnapshot(s: Snapshot): Snapshot {
     ops: s.ops ?? [],
     events: s.events ?? [],
     dependencies: s.dependencies ?? [],
+    schedule: s.schedule ?? { generatedAt: "", queue: [], estimates: [] },
   };
 }
 
@@ -30,6 +31,8 @@ export async function createRelease(req: {
   targetVersion: string;
   batchSize: number;
   strategy: string;
+  priority: number;
+  deadline?: string;
   failure: FailureSpec;
 }): Promise<void> {
   const res = await fetch("/api/releases", {

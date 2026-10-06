@@ -135,10 +135,14 @@ type Batch struct {
 	// CapacityWait is the persisted reason this batch cannot acquire zone
 	// capacity yet (which release holds the conflicting commitment). It
 	// survives a reopen and clears once the batch acquires its grants.
-	CapacityWait string   `json:"capacityWait,omitempty"`
-	GrantIDs     []string `json:"grantIds,omitempty"`
-	StartedAt    string   `json:"startedAt,omitempty"`
-	FinishedAt   string   `json:"finishedAt,omitempty"`
+	CapacityWait string `json:"capacityWait,omitempty"`
+	// CapacityWaitSince is when the current wait started. It drives the
+	// aging boost that keeps low-priority releases from starving while
+	// higher-priority releases keep arriving.
+	CapacityWaitSince string   `json:"capacityWaitSince,omitempty"`
+	GrantIDs          []string `json:"grantIds,omitempty"`
+	StartedAt         string   `json:"startedAt,omitempty"`
+	FinishedAt        string   `json:"finishedAt,omitempty"`
 }
 
 // FailureSpec injects failures for a drill without deploying anything.
@@ -150,12 +154,21 @@ type FailureSpec struct {
 }
 
 type Release struct {
-	ID              string      `json:"id"`
-	ServiceID       string      `json:"serviceId"`
-	TargetVersion   string      `json:"targetVersion"`
-	Baseline        string      `json:"baselineVersion"`
-	Strategy        string      `json:"strategy"` // rolling
-	BatchSize       int         `json:"batchSize"`
+	ID            string `json:"id"`
+	ServiceID     string `json:"serviceId"`
+	TargetVersion string `json:"targetVersion"`
+	Baseline      string `json:"baselineVersion"`
+	Strategy      string `json:"strategy"` // rolling
+	BatchSize     int    `json:"batchSize"`
+	// Priority orders waiting releases when they compete for shared zone
+	// capacity: higher values acquire freed capacity first. It only
+	// reorders not-yet-started batches; instances already updating or
+	// rolling back are never preempted.
+	Priority int `json:"priority"`
+	// Deadline is the operator-set latest acceptable finish time
+	// (RFC3339, empty = none). The coordination plan reports the specific
+	// capacity conflict when this deadline cannot be met.
+	Deadline        string      `json:"deadline,omitempty"`
 	BatchIDs        []string    `json:"batchIds"`
 	Status          string      `json:"status"` // pending|in_progress|paused|succeeded|failed|cancelling|rolling_back|rolled_back|cancelled
 	Failure         FailureSpec `json:"failure"`
@@ -223,6 +236,47 @@ type Snapshot struct {
 	// Dependencies lists, per in-flight release, the compatibility
 	// constraints that are not yet satisfied (unfinished dependencies).
 	Dependencies []DependencyStatus `json:"dependencies"`
+	// Schedule is the coordinated multi-release execution plan computed
+	// from the persisted state at snapshot time (read-only view).
+	Schedule ScheduleView `json:"schedule"`
+}
+
+// ScheduleItem is one not-yet-finished batch in the coordinated execution
+// order across all in-flight releases.
+type ScheduleItem struct {
+	Order       int    `json:"order"`
+	ReleaseID   string `json:"releaseId"`
+	ServiceID   string `json:"serviceId"`
+	ServiceName string `json:"serviceName"`
+	BatchID     string `json:"batchId"`
+	BatchIndex  int    `json:"batchIndex"`
+	Priority    int    `json:"priority"`
+	// EffectivePriority includes the aging boost earned while waiting, so
+	// a long-waiting low-priority release eventually moves up the queue.
+	EffectivePriority int    `json:"effectivePriority"`
+	State             string `json:"state"` // running|ready|waiting|conflict
+	Reason            string `json:"reason,omitempty"`
+}
+
+// ReleaseEstimate is the per-release completion forecast of the
+// coordinated plan, with the concrete capacity conflict when the
+// operator-set deadline cannot be met.
+type ReleaseEstimate struct {
+	ReleaseID       string   `json:"releaseId"`
+	ServiceName     string   `json:"serviceName"`
+	Priority        int      `json:"priority"`
+	Deadline        string   `json:"deadline,omitempty"`
+	EstimatedFinish string   `json:"estimatedFinish"`
+	OnTime          bool     `json:"onTime"`
+	Conflicts       []string `json:"conflicts,omitempty"`
+}
+
+// ScheduleView is the observable coordination plan: the executable batch
+// order across releases plus per-release deadline estimates.
+type ScheduleView struct {
+	GeneratedAt string            `json:"generatedAt"`
+	Queue       []ScheduleItem    `json:"queue"`
+	Estimates   []ReleaseEstimate `json:"estimates"`
 }
 
 // DependencyStatus summarizes the unmet compatibility constraints of one

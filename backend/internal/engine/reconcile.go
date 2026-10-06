@@ -14,11 +14,13 @@ func (e *Engine) reconcile(tx *store.Tx, now time.Time) (bool, error) {
 	if e.releaseSettledGrants(tx, now) {
 		return true, nil
 	}
-	for i := range tx.Releases() {
-		rel := &tx.Releases()[i]
-		if isReleaseTerminal(rel.Status) {
-			continue
-		}
+	// Releases compete for shared zone capacity in coordinated order:
+	// higher effective priority (operator priority + waiting-age boost)
+	// acquires freed capacity first. This only reorders not-yet-started
+	// batches; instances already updating or rolling back are never
+	// preempted, and low-priority releases cannot starve because their
+	// waiting age keeps raising their score.
+	for _, rel := range coordinatedReleases(tx, now) {
 		batches := releaseBatches(tx, rel.ID)
 		activeIdx := -1
 		for j := range batches {
@@ -121,6 +123,9 @@ func (e *Engine) reconcileBatch(tx *store.Tx, rel *store.Release, b *store.Batch
 		// individually safe plans can conflict in parallel; the later one
 		// waits here with a persisted, reopenable reason.
 		if reason, ok := e.tryAcquireCapacity(tx, rel, b, now); !ok {
+			if b.CapacityWaitSince == "" {
+				b.CapacityWaitSince = nowStr(now)
+			}
 			if b.CapacityWait != reason {
 				b.CapacityWait = reason
 				tx.AddEvent(nowStr(now), rel.ID, b.ID, "", "warn", batchLabel(b)+" 等待区域容量："+reason)

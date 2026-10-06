@@ -99,6 +99,7 @@ export interface Batch {
   members: MemberState[];
   preflight?: Preflight;
   capacityWait?: string;
+  capacityWaitSince?: string;
   grantIds?: string[];
   startedAt?: string;
   finishedAt?: string;
@@ -118,6 +119,8 @@ export interface Release {
   baseline: string;
   strategy: string;
   batchSize: number;
+  priority: number;
+  deadline?: string;
   batchIds: string[];
   status: "pending" | "in_progress" | "paused" | "succeeded" | "failed" | "cancelling" | "rolling_back" | "rolled_back" | "cancelled";
   failure: FailureSpec;
@@ -170,6 +173,36 @@ export interface Snapshot {
   ops: Op[];
   events: Event[];
   dependencies: DependencyStatus[];
+  schedule: ScheduleView;
+}
+
+export interface ScheduleItem {
+  order: number;
+  releaseId: string;
+  serviceId: string;
+  serviceName: string;
+  batchId: string;
+  batchIndex: number;
+  priority: number;
+  effectivePriority: number;
+  state: "running" | "ready" | "waiting" | "conflict";
+  reason?: string;
+}
+
+export interface ReleaseEstimate {
+  releaseId: string;
+  serviceName: string;
+  priority: number;
+  deadline?: string;
+  estimatedFinish: string;
+  onTime: boolean;
+  conflicts?: string[];
+}
+
+export interface ScheduleView {
+  generatedAt: string;
+  queue: ScheduleItem[];
+  estimates: ReleaseEstimate[];
 }
 
 export interface PlanBatch {

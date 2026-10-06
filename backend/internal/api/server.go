@@ -45,6 +45,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/zones/{id}/failure", s.handleSetZoneFailure)
 	mux.HandleFunc("POST /api/plans/compare", s.handleComparePlans)
 	mux.HandleFunc("GET /api/capacity/compare", s.handleCompareCapacity)
+	mux.HandleFunc("GET /api/schedule", s.handleSchedule)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return withCORS(mux)
 }
@@ -69,6 +70,7 @@ func (s *Server) snapshot() store.Snapshot {
 		}
 	})
 	snap.Dependencies = append([]store.DependencyStatus{}, s.svc.DependencyStatuses()...)
+	snap.Schedule = s.svc.ScheduleView(time.Now())
 	return snap
 }
 
@@ -366,6 +368,14 @@ func (s *Server) handleCompareCapacity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, cmp)
+}
+
+// handleSchedule serves the coordinated multi-release execution plan: the
+// executable batch order across releases and, per release, whether the
+// operator-set deadline is met — with the concrete capacity conflict when
+// it is not. Read-only.
+func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.svc.ScheduleView(time.Now()))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

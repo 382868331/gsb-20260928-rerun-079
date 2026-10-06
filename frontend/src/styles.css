@@ -227,3 +227,21 @@ button.warning:disabled { opacity: .5; cursor: not-allowed; }
 }
 .cmp-row.diff .cmp-cell { background: #2b2338; outline: 1px solid #6b4fa1; }
 .cmp-row.same .cmp-cell { opacity: 0.75; }
+
+.schedule table td.reason {
+  max-width: 32rem;
+  font-size: 0.85rem;
+}
+.pill.sq-running { background: #1d4ed8; color: #fff; }
+.pill.sq-ready { background: #15803d; color: #fff; }
+.pill.sq-waiting { background: #b45309; color: #fff; }
+.pill.sq-conflict { background: #b91c1c; color: #fff; }
+.estimates ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+.estimates li.ok { color: #15803d; }
+.estimates li.bad { color: #b91c1c; }
+.estimates .conflict {
+  display: block;
+  margin-left: 1rem;
+  font-size: 0.85rem;
+  color: #b91c1c;
+}
